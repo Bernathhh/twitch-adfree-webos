@@ -2,7 +2,7 @@ import {
   CONFIG_KEY,
   PROXY_SERVER_1,
   configOptions
-} from './constants/config.constants';
+} from './constants/config.constants.js';
 
 // The single `customProxyUrl` config was replaced by up to 5 `proxyServerN` slots.
 const LEGACY_CUSTOM_PROXY_URL_KEY = 'customProxyUrl';
@@ -45,12 +45,18 @@ const defaultConfig = (() => {
 const configFrags = (() => {
   let ret = {};
   for (const k in configOptions) {
-    ret[k] = new DocumentFragment();
+    ret[k] =
+      typeof DocumentFragment !== 'undefined'
+        ? new DocumentFragment()
+        : Object.create(null);
   }
   return ret;
 })();
 
 function loadStoredConfig() {
+  if (typeof window === 'undefined' || !window.localStorage) {
+    return null;
+  }
   const storage = window.localStorage.getItem(CONFIG_KEY);
 
   if (storage === null) {

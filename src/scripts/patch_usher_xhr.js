@@ -9,12 +9,14 @@
 // directly so the fix works regardless of whether the Worker-based patch
 // ever gets a chance to run.
 
-import { configRead } from '../config';
+import { configRead } from '../config.js';
 import {
   MAX_PROXY_SERVERS,
+  PRIMARY_PROXY,
+  PROXY_SERVERS,
   PROXY_SERVER_KEYS,
   USE_CUSTOM_PROXY
-} from '../constants/config.constants';
+} from '../constants/config.constants.js';
 
 const resolutions = {
   '160p30': {
@@ -215,11 +217,54 @@ function abortSilently(xhr) {
   });
 }
 
-function getProxyServers() {
-  return PROXY_SERVER_KEYS.map((key) => configRead(key))
+export function getProxyServers() {
+  const primary = configRead(PRIMARY_PROXY);
+
+  if (primary === 'proxy7.rte.net.ru') {
+    return [
+      'https://proxy7.rte.net.ru/',
+      'https://proxy4.rte.net.ru/',
+      'https://proxy5.rte.net.ru/',
+      'https://proxy6.rte.net.ru/'
+    ];
+  }
+  if (primary === 'proxy5.rte.net.ru') {
+    return [
+      'https://proxy5.rte.net.ru/',
+      'https://proxy4.rte.net.ru/',
+      'https://proxy7.rte.net.ru/',
+      'https://proxy6.rte.net.ru/'
+    ];
+  }
+  if (primary === 'proxy6.rte.net.ru') {
+    return [
+      'https://proxy6.rte.net.ru/',
+      'https://proxy4.rte.net.ru/',
+      'https://proxy7.rte.net.ru/',
+      'https://proxy5.rte.net.ru/'
+    ];
+  }
+  if (primary === 'Custom') {
+    const customList = PROXY_SERVER_KEYS.map((key) => configRead(key))
+      .filter((value) => typeof value === 'string' && value.trim() !== '')
+      .map((value) => value.trim())
+      .slice(0, MAX_PROXY_SERVERS);
+    if (customList.length > 0) {
+      return customList;
+    }
+  }
+
+  // Default: proxy4.rte.net.ru with fallback to proxy7.rte.net.ru
+  const configured = PROXY_SERVER_KEYS.map((key) => configRead(key))
     .filter((value) => typeof value === 'string' && value.trim() !== '')
     .map((value) => value.trim())
     .slice(0, MAX_PROXY_SERVERS);
+
+  if (configured.length > 0) {
+    return configured;
+  }
+
+  return [...PROXY_SERVERS];
 }
 
 // Mirror of patch_amazon_worker.js: Twitch's access token/signature live in the
@@ -258,7 +303,7 @@ function mergeOriginalQuery(target, originalUrl) {
   return (mergedQuery === '' ? base : `${base}?${mergedQuery}`) + hash;
 }
 
-function buildProxiedUrl(server, originalUrl, channel) {
+export function buildProxiedUrl(server, originalUrl, channel) {
   const trimmed = server.trim();
 
   if (trimmed.includes('$url') || trimmed.includes('{url}')) {
@@ -287,17 +332,48 @@ function buildProxiedUrl(server, originalUrl, channel) {
   return mergeOriginalQuery(trimmed, originalUrl);
 }
 
-function isLivePlaylistUrl(url) {
+export function isLivePlaylistUrl(url) {
+  if (typeof url !== 'string') {
+    return false;
+  }
   return (
-    url.includes('.m3u8') &&
-    url.includes('usher.ttvnw.net/api/') &&
-    url.includes('/channel/hls/')
+    url.includes('usher.ttvnw.net') &&
+    (url.includes('/api/v2/channel/hls/') || url.includes('/api/channel/hls/'))
   );
+}
+
+export function enforceSupportedCodecs(rawUrl) {
+  if (typeof rawUrl !== 'string') {
+    return rawUrl;
+  }
+  try {
+    const base =
+      typeof window !== 'undefined' && window.location && window.location.href
+        ? window.location.href
+        : 'https://lg.tv.twitch.tv/';
+    const parsed = new URL(rawUrl, base);
+    parsed.searchParams.set('supported_codecs', 'h265,h264');
+    return parsed
+      .toString()
+      .replace(
+        /supported_codecs=h265(?:%2C|,)h264/g,
+        'supported_codecs=h265,h264'
+      );
+  } catch {
+    if (rawUrl.includes('supported_codecs=')) {
+      return rawUrl.replace(
+        /supported_codecs=[^&]*/g,
+        'supported_codecs=h265,h264'
+      );
+    }
+    const sep = rawUrl.includes('?') ? '&' : '?';
+    return `${rawUrl}${sep}supported_codecs=h265,h264`;
+  }
 }
 
 async function proxyLivePlaylist(xhr, originalUrl, fallback) {
   let servers = [];
-  let channel = null;
+  let channel = '';
 
   try {
     if (configRead(USE_CUSTOM_PROXY)) {
@@ -305,22 +381,28 @@ async function proxyLivePlaylist(xhr, originalUrl, fallback) {
     }
 
     const channelMatch = new URL(originalUrl).pathname.match(
-      /\/channel\/hls\/([^.]+)\.m3u8/
+      /\/channel\/hls\/([^.]+)(?:\.m3u8)?/
     );
     if (channelMatch) {
       channel = channelMatch[1];
     }
   } catch (e) {
-    console.warn('[TAF] Failed to read proxy config for luminous playback', e);
+    console.warn('[TAF] Failed to read proxy config for live playback', e);
   }
 
-  if (channel && servers.length > 0) {
+  let targetUrl = enforceSupportedCodecs(originalUrl);
+  if (targetUrl.startsWith('//')) {
+    targetUrl = `https:${targetUrl}`;
+  } else if (targetUrl.startsWith('http://')) {
+    targetUrl = `https://${targetUrl.slice('http://'.length)}`;
+  }
+
+  if (servers.length > 0) {
     for (const server of servers) {
       try {
+        const proxiedUrl = buildProxiedUrl(server, targetUrl, channel);
         // eslint-disable-next-line no-await-in-loop
-        const response = await fetch(
-          buildProxiedUrl(server, originalUrl, channel)
-        );
+        const response = await fetch(proxiedUrl);
 
         if (response.ok) {
           // eslint-disable-next-line no-await-in-loop
@@ -333,6 +415,10 @@ async function proxyLivePlaylist(xhr, originalUrl, fallback) {
           );
           return;
         }
+        console.warn(
+          `[TAF] Proxy server returned HTTP ${response.status}, trying next:`,
+          server
+        );
       } catch (e) {
         console.warn('[TAF] Proxy server failed for live playback', server, e);
       }
@@ -347,6 +433,9 @@ export function installUsherXhrPatch() {
 
   window.XMLHttpRequest = class extends oldXHR {
     open(method, url, ...rest) {
+      if (isLivePlaylistUrl(url)) {
+        url = enforceSupportedCodecs(url);
+      }
       this._tafUrl = url;
       return super.open(method, url, ...rest);
     }
@@ -415,4 +504,71 @@ export function installUsherXhrPatch() {
       return super.send(body);
     }
   };
+
+  // Intercept window.fetch as well in case player requests live manifests via fetch
+  if (typeof window.fetch === 'function') {
+    const oldFetch = window.fetch;
+    window.fetch = async function (input, opt) {
+      let url;
+      if (input instanceof Request) {
+        url = input.url;
+      } else if (typeof input === 'string' || input instanceof String) {
+        url = input.toString();
+      }
+
+      if (url && isLivePlaylistUrl(url)) {
+        let targetUrl = enforceSupportedCodecs(url);
+        if (targetUrl.startsWith('//')) {
+          targetUrl = `https:${targetUrl}`;
+        } else if (targetUrl.startsWith('http://')) {
+          targetUrl = `https://${targetUrl.slice('http://'.length)}`;
+        }
+
+        let servers = [];
+        let channel = '';
+        try {
+          if (configRead(USE_CUSTOM_PROXY)) {
+            servers = getProxyServers();
+          }
+          const channelMatch = new URL(targetUrl).pathname.match(
+            /\/channel\/hls\/([^.]+)(?:\.m3u8)?/
+          );
+          if (channelMatch) {
+            channel = channelMatch[1];
+          }
+        } catch (e) {
+          console.warn('[TAF] Failed to read proxy config for fetch', e);
+        }
+
+        if (servers.length > 0) {
+          for (const server of servers) {
+            const proxiedUrl = buildProxiedUrl(server, targetUrl, channel);
+            const request =
+              input instanceof Request
+                ? new Request(proxiedUrl, input)
+                : proxiedUrl;
+            try {
+              // eslint-disable-next-line no-await-in-loop
+              const proxied = await oldFetch(request, opt);
+              if (proxied && proxied.ok) {
+                return proxied;
+              }
+              console.warn(
+                `[TAF] Proxy server returned HTTP ${proxied ? proxied.status : 'error'} in fetch, trying next:`,
+                server
+              );
+            } catch (e) {
+              console.warn('[TAF] Proxy server failed in fetch', server, e);
+            }
+          }
+        }
+
+        const fallbackReq =
+          input instanceof Request ? new Request(targetUrl, input) : targetUrl;
+        return oldFetch(fallbackReq, opt);
+      }
+
+      return oldFetch(input, opt);
+    };
+  }
 }

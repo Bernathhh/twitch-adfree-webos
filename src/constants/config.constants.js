@@ -22,6 +22,14 @@ export const PROXY_SERVERS = [
   'https://proxy5.rte.net.ru/',
   'https://proxy6.rte.net.ru/'
 ];
+export const PRIMARY_PROXY = 'primaryProxy';
+export const PRIMARY_PROXY_OPTIONS = [
+  'proxy4.rte.net.ru',
+  'proxy7.rte.net.ru',
+  'proxy5.rte.net.ru',
+  'proxy6.rte.net.ru',
+  'Custom'
+];
 export const PROXY_SERVER_1 = 'proxyServer1';
 export const PROXY_SERVER_2 = 'proxyServer2';
 export const PROXY_SERVER_3 = 'proxyServer3';
@@ -82,6 +90,11 @@ export const configOptions = {
   [USE_CUSTOM_PROXY]: {
     default: true,
     desc: 'Use proxy servers for HLS streaming (experimental)'
+  },
+  [PRIMARY_PROXY]: {
+    default: 'proxy4.rte.net.ru',
+    options: PRIMARY_PROXY_OPTIONS,
+    desc: 'Active proxy (auto-fallback to proxy7)'
   },
   [PROXY_SERVER_1]: { default: PROXY_SERVERS[0], desc: 'Proxy server 1' },
   [PROXY_SERVER_2]: { default: PROXY_SERVERS[1], desc: 'Proxy server 2' },

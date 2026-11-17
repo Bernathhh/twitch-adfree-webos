@@ -1,11 +1,8 @@
 import { configRead } from '../config';
-import {
-  MAX_PROXY_SERVERS,
-  PROXY_SERVER_KEYS,
-  USE_CUSTOM_PROXY
-} from '../constants/config.constants';
+import { USE_CUSTOM_PROXY } from '../constants/config.constants';
 import { APP_VERSION } from '../constants/global.constants';
-import { installUsherXhrPatch } from './patch_usher_xhr';
+import { getProxyServers, installUsherXhrPatch } from './patch_usher_xhr';
+import patchAmazonWorkerCode from './patch_amazon_worker.js?raw';
 
 const patchAmazonWorkerUrl =
   'https://adamff-dev.github.io/twitch-adfree-webos/src/scripts/patch_amazon_worker.js?v=' +
@@ -33,25 +30,24 @@ installUsherXhrPatch();
       );
 
       const useProxy = configRead(USE_CUSTOM_PROXY);
-      const proxyServers = PROXY_SERVER_KEYS.map((key) => configRead(key))
-        .filter((value) => typeof value === 'string' && value.trim() !== '')
-        .map((value) => value.trim())
-        .slice(0, MAX_PROXY_SERVERS);
+      const proxyServers = getProxyServers();
 
-      const blobUrl = URL.createObjectURL(
-        new Blob([
-          `
-            useProxy = ${JSON.stringify(useProxy)};
-            proxyServers = ${JSON.stringify(proxyServers)};
+      const workerInjectedHeader = `
+        useProxy = ${JSON.stringify(useProxy)};
+        proxyServers = ${JSON.stringify(proxyServers)};
+      `;
 
-            importScripts(
-              '${patchAmazonWorkerUrl}',
-            );
+      const blobParts = [workerInjectedHeader];
 
-            ${workerString}
-        `
-        ])
-      );
+      if (patchAmazonWorkerCode) {
+        blobParts.push('\n', patchAmazonWorkerCode, '\n');
+      } else {
+        blobParts.push(`\nimportScripts('${patchAmazonWorkerUrl}');\n`);
+      }
+
+      blobParts.push(workerString);
+
+      const blobUrl = URL.createObjectURL(new Blob(blobParts));
       super(blobUrl);
     }
   };

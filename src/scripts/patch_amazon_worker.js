@@ -1,6 +1,24 @@
 // Source: https://github.com/besuper/TwitchNoSub
 /* global useProxy, proxyServers */
 
+// Disable AV1 on MediaSource if worker supports it
+if (
+  typeof self !== 'undefined' &&
+  self.MediaSource &&
+  typeof self.MediaSource.isTypeSupported === 'function'
+) {
+  const origIsTypeSupported = self.MediaSource.isTypeSupported;
+  self.MediaSource.isTypeSupported = function (type) {
+    if (typeof type === 'string') {
+      const lower = type.toLowerCase();
+      if (lower.includes('av01') || lower.includes('av1')) {
+        return false;
+      }
+    }
+    return origIsTypeSupported.call(this || self.MediaSource, type);
+  };
+}
+
 let resolutions = {
   '160p30': {
     res: '284x160',
@@ -223,47 +241,96 @@ self.fetch = async function (input, opt) {
     return;
   }
 
-  // Redirect live HLS playlist requests through the configured proxy servers.
-  // `useProxy`/`proxyServers` are injected from twitch_no_sub.js, as this worker
-  // cannot access the extension config directly.
-  const proxyList = useProxy && Array.isArray(proxyServers) ? proxyServers : [];
+  function isLivePlaylistUrl(u) {
+    return (
+      typeof u === 'string' &&
+      u.includes('usher.ttvnw.net') &&
+      (u.includes('/api/v2/channel/hls/') || u.includes('/api/channel/hls/'))
+    );
+  }
 
-  if (
-    proxyList.length > 0 &&
-    url.includes('.m3u8') &&
-    url.includes('usher.ttvnw.net')
-  ) {
+  function enforceSupportedCodecs(rawUrl) {
     try {
-      const urlObj = new URL(url);
-      // /api/channel/hls/{channel}.m3u8 or /api/v2/channel/hls/{channel}.m3u8
-      const channelMatch = urlObj.pathname.match(
-        /\/api\/(?:v2\/)?channel\/hls\/([^.]+)\.m3u8/
-      );
+      const parsed = new URL(rawUrl);
+      parsed.searchParams.set('supported_codecs', 'h265,h264');
+      return parsed
+        .toString()
+        .replace(
+          /supported_codecs=h265(?:%2C|,)h264/g,
+          'supported_codecs=h265,h264'
+        );
+    } catch {
+      if (rawUrl.includes('supported_codecs=')) {
+        return rawUrl.replace(
+          /supported_codecs=[^&]*/g,
+          'supported_codecs=h265,h264'
+        );
+      }
+      const sep = rawUrl.includes('?') ? '&' : '?';
+      return `${rawUrl}${sep}supported_codecs=h265,h264`;
+    }
+  }
 
-      if (channelMatch && channelMatch[1]) {
-        const channel = channelMatch[1];
+  // Redirect live HLS playlist requests through the configured proxy servers.
+  if (isLivePlaylistUrl(url)) {
+    url = enforceSupportedCodecs(url);
+    if (url.startsWith('//')) {
+      url = `https:${url}`;
+    } else if (url.startsWith('http://')) {
+      url = `https://${url.slice('http://'.length)}`;
+    }
 
-        // Try each proxy server in order, falling back to the next one when a
-        // server fails. If every server fails, fall through to the direct URL.
-        for (const server of proxyList) {
-          const newUrl = buildProxiedUrl(server, url, channel);
-          const request =
-            input instanceof Request ? new Request(newUrl, input) : newUrl;
+    if (input instanceof Request) {
+      input = new Request(url, input);
+    } else {
+      input = url;
+    }
 
-          try {
-            // eslint-disable-next-line no-await-in-loop
-            const proxied = await oldFetch(request, opt);
-            if (proxied && proxied.ok) {
-              return proxied;
-            }
-          } catch (e) {
-            console.warn('Proxy server failed, trying next:', server, e);
+    const proxyList =
+      useProxy && Array.isArray(proxyServers) && proxyServers.length > 0
+        ? proxyServers
+        : useProxy
+          ? [
+              'https://proxy4.rte.net.ru/',
+              'https://proxy7.rte.net.ru/',
+              'https://proxy5.rte.net.ru/',
+              'https://proxy6.rte.net.ru/'
+            ]
+          : [];
+
+    if (proxyList.length > 0) {
+      let channel = '';
+      try {
+        const urlObj = new URL(url);
+        const channelMatch = urlObj.pathname.match(
+          /\/channel\/hls\/([^.]+)(?:\.m3u8)?/
+        );
+        if (channelMatch && channelMatch[1]) {
+          channel = channelMatch[1];
+        }
+      } catch (e) {
+        console.warn('Failed to parse channel from URL', e);
+      }
+
+      for (const server of proxyList) {
+        const newUrl = buildProxiedUrl(server, url, channel);
+        const request =
+          input instanceof Request ? new Request(newUrl, input) : newUrl;
+
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          const proxied = await oldFetch(request, opt);
+          if (proxied && proxied.ok) {
+            return proxied;
           }
+          console.warn(
+            `Proxy server returned HTTP ${proxied ? proxied.status : 'error'}, trying next:`,
+            server
+          );
+        } catch (e) {
+          console.warn('Proxy server failed, trying next:', server, e);
         }
       }
-    } catch (e) {
-      // Silently fail and use the direct URL if anything goes wrong
-      console.warn('Failed to build proxy URL for HLS streaming', e);
     }
   }
 

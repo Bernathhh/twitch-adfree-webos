@@ -24,8 +24,12 @@ const makeConfig = () => [
     module: {
       rules: [
         {
+          resourceQuery: /raw/,
+          type: 'asset/source'
+        },
+        {
           test: /\.[mc]?js$/i,
-
+          resourceQuery: { not: [/raw/] },
           loader: 'babel-loader',
           exclude: [
             // Some module should not be transpiled by Babel
@@ -56,7 +60,12 @@ const makeConfig = () => [
       new CopyPlugin({
         patterns: [
           { context: 'assets', from: '**/*' },
-          { context: 'src', from: 'index.html' }
+          { context: 'src', from: 'index.html' },
+          {
+            context: 'src/scripts',
+            from: 'patch_amazon_worker.js',
+            to: 'scripts/patch_amazon_worker.js'
+          }
         ]
       })
     ]
