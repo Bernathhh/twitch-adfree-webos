@@ -448,7 +448,19 @@ function createOptionsPanel() {
 }
 
 const optionsPanel = createOptionsPanel();
-document.body.appendChild(optionsPanel);
+const attachOptionsPanel = () => {
+  const root = document.body || document.documentElement;
+  if (root && optionsPanel && !optionsPanel.parentNode) {
+    root.appendChild(optionsPanel);
+  }
+};
+if (document.body || document.documentElement) {
+  attachOptionsPanel();
+} else {
+  document.addEventListener('DOMContentLoaded', attachOptionsPanel, {
+    once: true
+  });
+}
 
 let optionsPanelVisible = false;
 

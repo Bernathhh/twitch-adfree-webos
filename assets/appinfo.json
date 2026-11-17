@@ -9,7 +9,6 @@
   "splashBackground": "splash.png",
   "largeIcon": "largeIcon.png",
   "iconColor": "#000000",
-  "requiredMemory": 512,
   "vendorExtension": {
     "userAgent": "$browserName$/$browserVersion$ ($platformName$-$platformVersion$), _TV_O18/$firmwareVersion$ (LG, $modelName$, $networkMode$)",
     "allowCrossDomain": true

@@ -30,50 +30,92 @@ export function patchMediaCodecs() {
   }
 
   // 1. Override MediaSource.isTypeSupported
-  if (
-    typeof window.MediaSource !== 'undefined' &&
-    typeof window.MediaSource.isTypeSupported === 'function'
-  ) {
-    const origIsTypeSupported = window.MediaSource.isTypeSupported;
-    window.MediaSource.isTypeSupported = function (type) {
-      if (isAv1Codec(type)) {
-        return false;
+  try {
+    if (
+      typeof window.MediaSource !== 'undefined' &&
+      typeof window.MediaSource.isTypeSupported === 'function'
+    ) {
+      const origIsTypeSupported = window.MediaSource.isTypeSupported;
+      const patchedIsTypeSupported = function (type) {
+        if (isAv1Codec(type)) {
+          return false;
+        }
+        return origIsTypeSupported.call(window.MediaSource, type);
+      };
+      try {
+        Object.defineProperty(window.MediaSource, 'isTypeSupported', {
+          value: patchedIsTypeSupported,
+          writable: true,
+          configurable: true
+        });
+      } catch {
+        window.MediaSource.isTypeSupported = patchedIsTypeSupported;
       }
-      return origIsTypeSupported.call(this || window.MediaSource, type);
-    };
+    }
+  } catch (err) {
+    console.warn('[TAF] Failed to patch MediaSource.isTypeSupported', err);
   }
 
   // Also patch ManagedMediaSource if present in newer webOS WebEngine runtimes
-  if (
-    typeof window.ManagedMediaSource !== 'undefined' &&
-    typeof window.ManagedMediaSource.isTypeSupported === 'function'
-  ) {
-    const origManagedIsTypeSupported =
-      window.ManagedMediaSource.isTypeSupported;
-    window.ManagedMediaSource.isTypeSupported = function (type) {
-      if (isAv1Codec(type)) {
-        return false;
+  try {
+    if (
+      typeof window.ManagedMediaSource !== 'undefined' &&
+      typeof window.ManagedMediaSource.isTypeSupported === 'function'
+    ) {
+      const origManagedIsTypeSupported =
+        window.ManagedMediaSource.isTypeSupported;
+      const patchedManaged = function (type) {
+        if (isAv1Codec(type)) {
+          return false;
+        }
+        return origManagedIsTypeSupported.call(
+          window.ManagedMediaSource,
+          type
+        );
+      };
+      try {
+        Object.defineProperty(window.ManagedMediaSource, 'isTypeSupported', {
+          value: patchedManaged,
+          writable: true,
+          configurable: true
+        });
+      } catch {
+        window.ManagedMediaSource.isTypeSupported = patchedManaged;
       }
-      return origManagedIsTypeSupported.call(
-        this || window.ManagedMediaSource,
-        type
-      );
-    };
+    }
+  } catch (err) {
+    console.warn('[TAF] Failed to patch ManagedMediaSource', err);
   }
 
   // 2. Override HTMLMediaElement.prototype.canPlayType
-  if (
-    typeof window.HTMLMediaElement !== 'undefined' &&
-    window.HTMLMediaElement.prototype &&
-    typeof window.HTMLMediaElement.prototype.canPlayType === 'function'
-  ) {
-    const origCanPlayType = window.HTMLMediaElement.prototype.canPlayType;
-    window.HTMLMediaElement.prototype.canPlayType = function (type) {
-      if (isAv1Codec(type)) {
-        return '';
+  try {
+    if (
+      typeof window.HTMLMediaElement !== 'undefined' &&
+      window.HTMLMediaElement.prototype &&
+      typeof window.HTMLMediaElement.prototype.canPlayType === 'function'
+    ) {
+      const origCanPlayType = window.HTMLMediaElement.prototype.canPlayType;
+      const patchedCanPlayType = function (type) {
+        if (isAv1Codec(type)) {
+          return '';
+        }
+        return origCanPlayType.call(this, type);
+      };
+      try {
+        Object.defineProperty(window.HTMLMediaElement.prototype, 'canPlayType', {
+          value: patchedCanPlayType,
+          writable: true,
+          configurable: true
+        });
+      } catch {
+        window.HTMLMediaElement.prototype.canPlayType = patchedCanPlayType;
       }
-      return origCanPlayType.call(this, type);
-    };
+    }
+  } catch (err) {
+    console.warn(
+      '[TAF] Failed to patch HTMLMediaElement.prototype.canPlayType',
+      err
+    );
   }
 }
 
