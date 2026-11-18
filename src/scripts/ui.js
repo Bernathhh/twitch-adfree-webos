@@ -201,8 +201,11 @@ export function reloadTwitchStream() {
   let handled = false;
   videos.forEach((video) => {
     try {
-      if (video.currentTime > 0) {
-        video.currentTime = Math.max(0, video.currentTime - 0.2);
+      if (video.buffered && video.buffered.length > 0) {
+        const end = video.buffered.end(video.buffered.length - 1);
+        video.currentTime = Math.max(0, end - 0.5);
+      } else if (video.currentTime > 0) {
+        video.currentTime = Math.max(0, video.currentTime + 0.1);
       }
       const playPromise = video.play();
       if (playPromise && typeof playPromise.catch === 'function') {
@@ -228,11 +231,61 @@ export function reloadTwitchStream() {
   }
 
   showNotification(
-    handled ? 'Перезапуск видео...' : 'Видео не найдено',
-    3000,
+    handled ? 'Разморозка видео / перезапуск...' : 'Видео не найдено',
+    2500,
     'info'
   );
   return handled;
+}
+
+export function resetToStableQuality() {
+  try {
+    const gearBtn = document.querySelector(
+      'button[data-a-target="player-settings-button"]'
+    );
+    if (gearBtn) {
+      gearBtn.click();
+      setTimeout(() => {
+        const qualityItem = document.querySelector(
+          '[data-a-target="player-settings-menu-item-quality"]'
+        );
+        if (qualityItem) {
+          qualityItem.click();
+          setTimeout(() => {
+            const radioItems = Array.from(
+              document.querySelectorAll('input[name="player-quality-setting"]')
+            );
+            const targetRadio = radioItems.find((r) => {
+              const label = r.closest('label');
+              const text = label ? label.textContent : '';
+              return (
+                text.includes('1080p') ||
+                text.includes('Auto') ||
+                text.includes('Авто')
+              );
+            });
+            if (targetRadio) {
+              targetRadio.click();
+              showNotification(
+                'Качество переключено на 1080p / Авто',
+                3000,
+                'info'
+              );
+            }
+            if (gearBtn) gearBtn.click();
+          }, 120);
+        } else if (gearBtn) {
+          gearBtn.click();
+        }
+      }, 120);
+      return true;
+    }
+  } catch {
+    /* ignore */
+  }
+  reloadTwitchStream();
+  showNotification('Сброс видеопотока...', 2500, 'info');
+  return false;
 }
 
 function createConfigCheckbox(key) {
@@ -530,13 +583,31 @@ function createOptionsPanel() {
   const quickActions = document.createElement('div');
   quickActions.classList.add('taf-quick-actions');
 
-  const reloadBtn = document.createElement('button');
-  reloadBtn.type = 'button';
-  reloadBtn.classList.add('taf-action-btn');
-  reloadBtn.textContent = '🔄 Перезапустить видео';
-  reloadBtn.title = 'Перезапустить текущее воспроизведение';
-  reloadBtn.addEventListener('click', () => {
+  const unfreezeBtn = document.createElement('button');
+  unfreezeBtn.type = 'button';
+  unfreezeBtn.classList.add('taf-action-btn');
+  unfreezeBtn.textContent = '🔄 Разморозить видео';
+  unfreezeBtn.title = 'Сбросить буфер и возобновить воспроизведение (кнопка Red)';
+  unfreezeBtn.addEventListener('click', () => {
     reloadTwitchStream();
+  });
+
+  const resetQualBtn = document.createElement('button');
+  resetQualBtn.type = 'button';
+  resetQualBtn.classList.add('taf-action-btn');
+  resetQualBtn.textContent = '⚡ 1080p / Авто';
+  resetQualBtn.title = 'Сбросить качество на стабильное 1080p или Авто при зависаниях';
+  resetQualBtn.addEventListener('click', () => {
+    resetToStableQuality();
+  });
+
+  const proxyBtn = document.createElement('button');
+  proxyBtn.type = 'button';
+  proxyBtn.classList.add('taf-action-btn');
+  proxyBtn.textContent = '🛡️ Сменить прокси';
+  proxyBtn.title = 'Быстро переключить прокси-сервер (кнопка Blue)';
+  proxyBtn.addEventListener('click', () => {
+    cycleNextProxy();
   });
 
   const chatBtn = document.createElement('button');
@@ -548,15 +619,6 @@ function createOptionsPanel() {
     toggleTwitchChat();
   });
 
-  const proxyBtn = document.createElement('button');
-  proxyBtn.type = 'button';
-  proxyBtn.classList.add('taf-action-btn');
-  proxyBtn.textContent = '🛡️ Сменить прокси';
-  proxyBtn.title = 'Быстро переключить прокси-сервер';
-  proxyBtn.addEventListener('click', () => {
-    cycleNextProxy();
-  });
-
   const closeBtn = document.createElement('button');
   closeBtn.type = 'button';
   closeBtn.classList.add('taf-action-btn', 'taf-btn-close');
@@ -566,9 +628,10 @@ function createOptionsPanel() {
     showOptionsPanel(false);
   });
 
-  quickActions.appendChild(reloadBtn);
-  quickActions.appendChild(chatBtn);
+  quickActions.appendChild(unfreezeBtn);
+  quickActions.appendChild(resetQualBtn);
   quickActions.appendChild(proxyBtn);
+  quickActions.appendChild(chatBtn);
   quickActions.appendChild(closeBtn);
 
   elmContainer.appendChild(quickActions);
@@ -694,6 +757,26 @@ const eventHandler = (evt) => {
       return false;
     }
     return true;
+  }
+
+  // Red button: instant emergency video unfreeze / buffer reload
+  if (isRedKey(evt)) {
+    evt.preventDefault();
+    evt.stopPropagation();
+    if (evt.type === 'keydown') {
+      reloadTwitchStream();
+    }
+    return false;
+  }
+
+  // Blue button: instant proxy server cycle
+  if (isBlueKey(evt)) {
+    evt.preventDefault();
+    evt.stopPropagation();
+    if (evt.type === 'keydown') {
+      cycleNextProxy();
+    }
+    return false;
   }
 
   if (
@@ -1030,31 +1113,11 @@ function initChatOverlay() {
   });
 }
 
-export function createFloatingSettingsButton() {
-  if (document.querySelector('.taf-floating-btn')) return;
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  btn.classList.add('taf-floating-btn');
-  btn.setAttribute('aria-label', 'Open Twitch AdFree Settings');
-  btn.innerHTML = '⚙ <span class="taf-floating-badge">Green</span>';
-  btn.tabIndex = 0;
-  btn.addEventListener('click', (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    showOptionsPanel(!optionsPanelVisible);
-  });
-  const root = document.body || document.documentElement;
-  if (root) {
-    root.appendChild(btn);
-  }
-}
-
 function init() {
   handleAdsAndConsentModals();
   initRemoveAnimations();
   initKeyListeners();
   initChatOverlay();
-  createFloatingSettingsButton();
 
   showNotification('Press [GREEN] button to open configuration', 5000, 'info');
 }

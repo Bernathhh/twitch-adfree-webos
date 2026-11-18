@@ -77,42 +77,6 @@
   border-color: #ff5722;
 }
 
-.taf-floating-btn {
-  position: fixed;
-  top: 18px;
-  right: 18px;
-  z-index: 9999;
-  background: rgba(20, 20, 25, 0.85);
-  color: #fff;
-  border: 1px solid #9147ff;
-  border-radius: 8px;
-  padding: 6px 12px;
-  font-size: 1.4rem;
-  font-weight: 600;
-  cursor: pointer;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  opacity: 0.75;
-  transition: opacity 0.2s, transform 0.2s;
-}
-
-.taf-floating-btn:hover,
-.taf-floating-btn:focus {
-  opacity: 1;
-  transform: scale(1.05);
-  outline: 2px solid #b583ff;
-}
-
-.taf-floating-badge {
-  background: #2e7d32;
-  color: #fff;
-  font-size: 1.1rem;
-  padding: 2px 6px;
-  border-radius: 4px;
-}
-
 .taf-options-list {
   display: flex;
   flex-direction: column;

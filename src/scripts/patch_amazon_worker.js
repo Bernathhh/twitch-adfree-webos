@@ -33,26 +33,33 @@ if (
         if (origIsTypeSupported.call(self.MediaSource, type)) {
           return true;
         }
-        if (
-          typeof type === 'string' &&
-          type.includes('hev1') &&
-          origIsTypeSupported.call(
-            self.MediaSource,
-            type.replace(/hev1/g, 'hvc1')
-          )
-        ) {
-          return true;
+        if (typeof type === 'string') {
+          const swapped = type.includes('hev1')
+            ? type.replace(/hev1/g, 'hvc1')
+            : type.replace(/hvc1/g, 'hev1');
+          if (origIsTypeSupported.call(self.MediaSource, swapped)) {
+            return true;
+          }
+          const baseType = type.includes('mp4a')
+            ? 'video/mp4; codecs="hvc1.1.6.L93.B0,mp4a.40.2"'
+            : 'video/mp4; codecs="hvc1.1.6.L93.B0"';
+          if (origIsTypeSupported.call(self.MediaSource, baseType)) {
+            return true;
+          }
+          if (origIsTypeSupported.call(self.MediaSource, 'video/mp4; codecs="hvc1"')) {
+            return true;
+          }
         }
       } catch {
         /* ignore */
       }
-      return true;
+      return false;
     }
     return origIsTypeSupported.call(this || self.MediaSource, type);
   };
 }
 
-// Override MediaSource.prototype.addSourceBuffer to normalize hev1 -> hvc1
+// Override MediaSource.prototype.addSourceBuffer to handle HEVC fallbacks
 if (
   typeof self !== 'undefined' &&
   self.MediaSource &&
@@ -62,20 +69,35 @@ if (
   const origAddSourceBuffer = self.MediaSource.prototype.addSourceBuffer;
   self.MediaSource.prototype.addSourceBuffer = function (type) {
     let targetType = type;
-    if (typeof targetType === 'string' && targetType.includes('hev1')) {
-      targetType = targetType.replace(/hev1/g, 'hvc1');
-    }
     try {
       return origAddSourceBuffer.call(this, targetType);
     } catch (err) {
       if (typeof targetType === 'string' && isHevcCodec(targetType)) {
+        const swapped = targetType.includes('hev1')
+          ? targetType.replace(/hev1/g, 'hvc1')
+          : targetType.replace(/hvc1/g, 'hev1');
         try {
-          const fallbackType = targetType.includes('mp4a')
-            ? 'video/mp4; codecs="hvc1,mp4a.40.2"'
-            : 'video/mp4; codecs="hvc1"';
-          return origAddSourceBuffer.call(this, fallbackType);
+          return origAddSourceBuffer.call(this, swapped);
         } catch {
           /* ignore */
+        }
+
+        const fallbacks = [
+          targetType.includes('mp4a')
+            ? 'video/mp4; codecs="hvc1.1.6.L93.B0,mp4a.40.2"'
+            : 'video/mp4; codecs="hvc1.1.6.L93.B0"',
+          targetType.includes('mp4a')
+            ? 'video/mp4; codecs="hvc1,mp4a.40.2"'
+            : 'video/mp4; codecs="hvc1"',
+          'video/mp4; codecs="hev1"',
+          'video/mp4; codecs="hevc"'
+        ];
+        for (const fb of fallbacks) {
+          try {
+            return origAddSourceBuffer.call(this, fb);
+          } catch {
+            /* ignore */
+          }
         }
       }
       throw err;

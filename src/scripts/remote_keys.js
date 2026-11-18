@@ -69,6 +69,9 @@ export function isRedKey(evt) {
   ) {
     return true;
   }
+  if ((evt.key === 'r' || evt.key === 'R') && !isInputFocused()) {
+    return true;
+  }
   return false;
 }
 
@@ -82,6 +85,9 @@ export function isBlueKey(evt) {
     evt.key === 'F4' ||
     evt.code === 'ColorF3Blue'
   ) {
+    return true;
+  }
+  if ((evt.key === 'b' || evt.key === 'B') && !isInputFocused()) {
     return true;
   }
   return false;
