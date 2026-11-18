@@ -420,6 +420,21 @@ self.fetch = async function (input, opt) {
     }
   }
 
+  function fetchWithTimeout(req, options = {}, timeoutMs = 2500) {
+    if (typeof AbortController === 'undefined') {
+      return oldFetch(req, options);
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      controller.abort();
+    }, timeoutMs);
+
+    const mergedOptions = { ...options, signal: controller.signal };
+    return oldFetch(req, mergedOptions).finally(() => {
+      clearTimeout(timer);
+    });
+  }
+
   // Redirect live HLS playlist requests through the configured proxy servers.
   if (isLivePlaylistUrl(url)) {
     url = enforceSupportedCodecs(url);
@@ -468,7 +483,7 @@ self.fetch = async function (input, opt) {
 
         try {
           // eslint-disable-next-line no-await-in-loop
-          const proxied = await oldFetch(request, opt);
+          const proxied = await fetchWithTimeout(request, opt, 2500);
           if (proxied && proxied.ok) {
             // eslint-disable-next-line no-await-in-loop
             const text = await proxied.text();

@@ -196,6 +196,38 @@ export function cycleNextProxy() {
   return nextProxy;
 }
 
+export function clickAnyPlayButton() {
+  const selectors = [
+    'button[data-a-target="player-overlay-play-button"]',
+    '[data-a-target="player-overlay-play-button"]',
+    'button[data-a-target="content-overlay-gate__play-button"]',
+    'button[data-a-target="player-play-pause-button"]',
+    '.player-overlay-background button',
+    '.content-overlay-gate button',
+    'button[aria-label*="Play" i]',
+    'button[aria-label*="Воспроизведение" i]',
+    'button[aria-label*="воспроизведение" i]'
+  ];
+
+  for (const sel of selectors) {
+    const btn = document.querySelector(sel);
+    if (btn && typeof btn.click === 'function') {
+      btn.click();
+      return true;
+    }
+  }
+
+  const playerContainer =
+    document.querySelector('[data-a-target="video-player"]') ||
+    document.querySelector('.video-player__container');
+  if (playerContainer && typeof playerContainer.click === 'function') {
+    playerContainer.click();
+    return true;
+  }
+
+  return false;
+}
+
 export function reloadTwitchStream() {
   const videos = getPlayerVideos(true);
   let handled = false;
@@ -219,15 +251,8 @@ export function reloadTwitchStream() {
     }
   });
 
-  const playBtn = document.querySelector(
-    'button[data-a-target="player-play-pause-button"]'
-  );
-  if (playBtn) {
-    const label = (playBtn.getAttribute('aria-label') || '').toLowerCase();
-    if (label.includes('play') || label.includes('воспроизведение')) {
-      playBtn.click();
-      handled = true;
-    }
+  if (clickAnyPlayButton()) {
+    handled = true;
   }
 
   showNotification(
@@ -735,36 +760,17 @@ window.taf_showOptionsPanel = showOptionsPanel;
  * so the real chat state is toggled (rather than just hiding the chat element).
  */
 export function toggleTwitchChat() {
+  document.body.classList.toggle('chat-open');
   const toggleButton = document.querySelector(CHAT_TOGGLE_SELECTOR);
   if (toggleButton) {
     toggleButton.click();
   }
 }
 
-let chatAutoCollapsed = false;
-let lastKnownLocation =
-  typeof window !== 'undefined' && window.location ? window.location.href : '';
-
 export function autoCollapseChatIfDisabled() {
-  if (configRead(ENABLE_CHAT_OVERLAY)) return;
-
-  const currentHref =
-    typeof window !== 'undefined' && window.location
-      ? window.location.href
-      : '';
-  if (currentHref && currentHref !== lastKnownLocation) {
-    lastKnownLocation = currentHref;
-    chatAutoCollapsed = false;
-  }
-
-  if (chatAutoCollapsed) return;
-
-  const toggleBtn = document.querySelector(CHAT_TOGGLE_SELECTOR);
-  const chatAside = document.querySelector('main > aside');
-  if (toggleBtn && chatAside) {
-    chatAutoCollapsed = true;
-    toggleBtn.click();
-  }
+  // Chat is collapsed cleanly via CSS rule:
+  // body:not(.with-chat-overlay):not(.chat-open) main > aside { display: none !important; }
+  // No synthetic .click() on load to avoid focus stealing and video autoplay interruption.
 }
 
 function handleNumberButtonsClick(keyCode) {
@@ -1149,11 +1155,48 @@ function initChatOverlay() {
   });
 }
 
+function initAutoplayRecovery() {
+  if (typeof window === 'undefined') return;
+
+  const tryStartPlayback = () => {
+    const videos = getPlayerVideos(true);
+    for (const v of videos) {
+      if (v.paused) {
+        const p = v.play();
+        if (p && typeof p.catch === 'function') {
+          p.catch(() => {
+            clickAnyPlayButton();
+          });
+        }
+      }
+    }
+  };
+
+  document.addEventListener('loadeddata', tryStartPlayback, true);
+  document.addEventListener('canplay', tryStartPlayback, true);
+
+  // When Enter / OK (13) is pressed on remote while video is paused, trigger play
+  document.addEventListener(
+    'keydown',
+    (e) => {
+      if (e.keyCode === 13 && !isInputFocused()) {
+        const videos = getPlayerVideos(true);
+        if (videos.some((v) => v.paused)) {
+          tryStartPlayback();
+          clickAnyPlayButton();
+        }
+      }
+    },
+    true
+  );
+}
+
 function init() {
   handleAdsAndConsentModals();
   initRemoveAnimations();
   initKeyListeners();
   initChatOverlay();
+  initAutoplayRecovery();
 
   showNotification('Press [GREEN] button to open configuration', 5000, 'info');
 }

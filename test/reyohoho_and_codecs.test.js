@@ -29,8 +29,10 @@ import {
 import {
   configOptions,
   LOAD_EMOTES,
-  ENABLE_CHAT_OVERLAY
+  ENABLE_CHAT_OVERLAY,
+  USE_CUSTOM_PROXY
 } from '../src/constants/config.constants.js';
+import { configWrite } from '../src/config.js';
 
 test('isLivePlaylistUrl matches live usher HLS endpoints and ignores others', () => {
   assert.equal(
@@ -302,6 +304,15 @@ test('patchMediaCodecs overrides MediaSource.isTypeSupported, addSourceBuffer an
   }
 });
 
+class FakeXHR {
+  open(method, url) {
+    this.method = method;
+    this.url = url;
+  }
+  send() {}
+  dispatchEvent() {}
+}
+
 test('XHR and fetch proxying intercepts usher requests and falls back to proxy7 on failure', async () => {
   const requestedUrls = [];
 
@@ -331,15 +342,6 @@ test('XHR and fetch proxying intercepts usher requests and falls back to proxy7 
   const originalWindow = globalThis.window;
   const originalFetch = globalThis.fetch;
 
-  class FakeXHR {
-    open(method, url) {
-      this.method = method;
-      this.url = url;
-    }
-    send() {}
-    dispatchEvent() {}
-  }
-
   globalThis.window = /** @type {any} */ ({
     location: { href: 'https://lg.tv.twitch.tv/' },
     XMLHttpRequest: FakeXHR,
@@ -349,6 +351,7 @@ test('XHR and fetch proxying intercepts usher requests and falls back to proxy7 
 
   installUsherXhrPatch();
 
+  configWrite(USE_CUSTOM_PROXY, true);
   requestedUrls.length = 0;
   const res = await globalThis.window.fetch(
     'https://usher.ttvnw.net/api/v2/channel/hls/testch.m3u8?supported_codecs=av1,h264'
@@ -361,7 +364,54 @@ test('XHR and fetch proxying intercepts usher requests and falls back to proxy7 
   const bodyText = await res.text();
   assert.match(bodyText, /CODECS="hvc1\.1\.6\.L93\.B0"/);
 
+  configWrite(USE_CUSTOM_PROXY, false);
+
   // Restore
+  globalThis.window = originalWindow;
+  globalThis.fetch = originalFetch;
+});
+
+test('direct usher fetch is used when USE_CUSTOM_PROXY is false (default)', async () => {
+  const requestedUrls = [];
+  const fakeFetch = async (input) => {
+    const url = input instanceof Request ? input.url : String(input);
+    requestedUrls.push(url);
+    return new Response(
+      '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=6000000,CODECS="hev1.1.6.L150.90.0.0.0.0.0"\nstream.m3u8',
+      {
+        status: 200,
+        headers: { 'Content-Type': 'application/vnd.apple.mpegurl' }
+      }
+    );
+  };
+
+  const originalWindow = globalThis.window;
+  const originalFetch = globalThis.fetch;
+
+  globalThis.window = /** @type {any} */ ({
+    location: { href: 'https://lg.tv.twitch.tv/' },
+    XMLHttpRequest: FakeXHR,
+    fetch: fakeFetch
+  });
+  globalThis.fetch = fakeFetch;
+
+  installUsherXhrPatch();
+
+  requestedUrls.length = 0;
+  const res = await globalThis.window.fetch(
+    'https://usher.ttvnw.net/api/v2/channel/hls/directtest.m3u8'
+  );
+
+  assert.equal(res.status, 200);
+  assert.equal(requestedUrls.length, 1);
+  assert.equal(
+    requestedUrls[0],
+    'https://usher.ttvnw.net/api/v2/channel/hls/directtest.m3u8?supported_codecs=h265,h264'
+  );
+
+  const text = await res.text();
+  assert.match(text, /CODECS="hvc1\.1\.6\.L150\.90"/);
+
   globalThis.window = originalWindow;
   globalThis.fetch = originalFetch;
 });
@@ -476,8 +526,9 @@ test('isInputFocused correctly detects focused text inputs', () => {
   globalThis.document = origDoc;
 });
 
-test('LOAD_EMOTES and ENABLE_CHAT_OVERLAY default to false', () => {
+test('LOAD_EMOTES, ENABLE_CHAT_OVERLAY and USE_CUSTOM_PROXY default to false', () => {
   assert.equal(configOptions[LOAD_EMOTES].default, false);
   assert.equal(configOptions[ENABLE_CHAT_OVERLAY].default, false);
+  assert.equal(configOptions[USE_CUSTOM_PROXY].default, false);
 });
 

@@ -117,13 +117,20 @@ export function configWrite(key, value) {
     localConfig[key] !== undefined ? localConfig[key] : defaultConfig[key];
 
   localConfig[key] = value;
-  window.localStorage[CONFIG_KEY] = JSON.stringify(localConfig);
+  if (typeof window !== 'undefined' && window.localStorage) {
+    window.localStorage[CONFIG_KEY] = JSON.stringify(localConfig);
+  }
 
-  configFrags[key].dispatchEvent(
-    new CustomEvent('tafConfigChange', {
-      detail: { key, newValue: value, oldValue }
-    })
-  );
+  if (
+    configFrags[key] &&
+    typeof configFrags[key].dispatchEvent === 'function'
+  ) {
+    configFrags[key].dispatchEvent(
+      new CustomEvent('tafConfigChange', {
+        detail: { key, newValue: value, oldValue }
+      })
+    );
+  }
 }
 
 export function configAddChangeListener(key, callback) {

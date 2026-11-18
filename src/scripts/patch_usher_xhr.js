@@ -474,6 +474,20 @@ export function enforceSupportedCodecs(rawUrl) {
   }
 }
 
+export function fetchWithTimeout(url, options = {}, timeoutMs = 2500) {
+  if (typeof AbortController === 'undefined') {
+    return fetch(url, options);
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+
+  return fetch(url, { ...options, signal: controller.signal }).finally(() => {
+    clearTimeout(timer);
+  });
+}
+
 async function proxyLivePlaylist(xhr, originalUrl, fallback) {
   let servers = [];
   let channel = '';
@@ -505,7 +519,7 @@ async function proxyLivePlaylist(xhr, originalUrl, fallback) {
       try {
         const proxiedUrl = buildProxiedUrl(server, targetUrl, channel);
         // eslint-disable-next-line no-await-in-loop
-        const response = await fetch(proxiedUrl);
+        const response = await fetchWithTimeout(proxiedUrl, {}, 2500);
 
         if (response.ok) {
           // eslint-disable-next-line no-await-in-loop
@@ -530,7 +544,7 @@ async function proxyLivePlaylist(xhr, originalUrl, fallback) {
 
   // Direct usher fallback with manifest patching
   try {
-    const directResp = await fetch(targetUrl);
+    const directResp = await fetchWithTimeout(targetUrl, {}, 5000);
     if (directResp.ok) {
       const directText = await directResp.text();
       respondWith(
