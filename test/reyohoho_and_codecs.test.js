@@ -172,6 +172,17 @@ test('checkHevcSupported normalizes syntax and tests swapped FourCCs without spo
     checkHevcSupported(origFn, null, 'video/mp4; codecs="hev1.1.6.L180.90"'),
     false
   );
+
+  // When webOS Chromium only supports up to L123 in MSE:
+  const webosOrigFn = (type) => type === 'video/mp4; codecs="hvc1.1.6.L123.90"';
+  assert.equal(
+    checkHevcSupported(
+      webosOrigFn,
+      null,
+      'video/mp4; codecs="hev1.1.6.L150.90.0.0.0.0.0"'
+    ),
+    true
+  );
 });
 
 test('patchManifest removes AV1 variants and cleans/normalizes hev1 to hvc1', () => {
@@ -193,9 +204,9 @@ https://euc12.playlist.ttvnw.net/v1/playlist/1080p.m3u8`;
   assert.equal(patched.includes('1440p60_av1'), false);
   assert.equal(patched.includes('av1.m3u8'), false);
 
-  // HEVC must be cleaned and normalized to hvc1
+  // HEVC must be cleaned and normalized to hvc1 with level normalized to L123 for webOS
   assert.equal(patched.includes('hev1'), false);
-  assert.match(patched, /CODECS="hvc1\.1\.6\.L150\.90,mp4a\.40\.2"/);
+  assert.match(patched, /CODECS="hvc1\.1\.6\.L123\.90,mp4a\.40\.2"/);
   assert.equal(patched.includes('1440p60_hevc'), true);
   assert.equal(patched.includes('hevc.m3u8'), true);
 
@@ -410,7 +421,7 @@ test('direct usher fetch is used when USE_CUSTOM_PROXY is false (default)', asyn
   );
 
   const text = await res.text();
-  assert.match(text, /CODECS="hvc1\.1\.6\.L150\.90"/);
+  assert.match(text, /CODECS="hvc1\.1\.6\.L123\.90"/);
 
   globalThis.window = originalWindow;
   globalThis.fetch = originalFetch;

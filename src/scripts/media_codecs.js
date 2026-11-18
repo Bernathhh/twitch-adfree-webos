@@ -88,11 +88,56 @@ export function checkHevcSupported(origFn, context, type) {
       if (origFn.call(context, swapped)) {
         return true;
       }
+      // If webOS MSE rejects Level 5.0+ (L150/L153) due to Chromium level table,
+      // check with normalized Level 4.1 (L123) or generic hvc1:
+      const normalized = swapped.replace(
+        /(hvc1\.[1-9]\d*\.[\da-fA-F]+\.)L(?:15\d|16\d|17\d|18\d)(\.[\da-fA-F]+)?/g,
+        '$1L123$2'
+      );
+      if (normalized !== swapped && origFn.call(context, normalized)) {
+        return true;
+      }
+      if (origFn.call(context, 'video/mp4; codecs="hvc1"')) {
+        return true;
+      }
+      if (origFn.call(context, 'video/mp4; codecs="hev1"')) {
+        return true;
+      }
     }
   } catch {
     /* ignore */
   }
   return false;
+}
+
+/**
+ * Attaches safe back-buffer pruning to a SourceBuffer on updateend
+ * to prevent TV RAM exhaustion and decoder freezes on 1440p60.
+ *
+ * @param {unknown} sb
+ */
+export function attachBufferEviction(sb) {
+  try {
+    if (!sb || typeof sb.addEventListener !== 'function') return;
+    sb.addEventListener('updateend', () => {
+      try {
+        if (!sb.updating && sb.buffered && sb.buffered.length > 0) {
+          const video = document.querySelector('video');
+          if (video && video.currentTime > 0) {
+            const start = sb.buffered.start(0);
+            // Evict back-buffer older than 12 seconds to save TV RAM on 1440p60
+            if (video.currentTime - start > 12) {
+              sb.remove(start, video.currentTime - 6);
+            }
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+    });
+  } catch {
+    /* ignore */
+  }
 }
 
 /**
@@ -271,13 +316,17 @@ export function patchMediaCodecs() {
       const patchedAddSourceBuffer = function (type) {
         let targetType = type;
         try {
-          return origAddSourceBuffer.call(this, targetType);
+          const sb = origAddSourceBuffer.call(this, targetType);
+          attachBufferEviction(sb);
+          return sb;
         } catch (err1) {
           if (typeof targetType === 'string' && isHevcCodec(targetType)) {
             const cleaned = cleanHevcCodec(targetType);
             if (cleaned !== targetType) {
               try {
-                return origAddSourceBuffer.call(this, cleaned);
+                const sb = origAddSourceBuffer.call(this, cleaned);
+                attachBufferEviction(sb);
+                return sb;
               } catch {
                 /* ignore */
               }
@@ -286,9 +335,47 @@ export function patchMediaCodecs() {
               ? cleaned.replace(/hev1/g, 'hvc1')
               : cleaned.replace(/hvc1/g, 'hev1');
             try {
-              return origAddSourceBuffer.call(this, swapped);
+              const sb = origAddSourceBuffer.call(this, swapped);
+              attachBufferEviction(sb);
+              return sb;
             } catch {
               /* ignore */
+            }
+
+            const normalized = swapped.replace(
+              /(hvc1\.[1-9]\d*\.[\da-fA-F]+\.)L(?:15\d|16\d|17\d|18\d)(\.[\da-fA-F]+)?/g,
+              '$1L123$2'
+            );
+            if (normalized !== swapped) {
+              try {
+                const sb = origAddSourceBuffer.call(this, normalized);
+                attachBufferEviction(sb);
+                return sb;
+              } catch {
+                /* ignore */
+              }
+            }
+
+            const fallbacks = [
+              targetType.includes('mp4a')
+                ? 'video/mp4; codecs="hvc1,mp4a.40.2"'
+                : 'video/mp4; codecs="hvc1"',
+              targetType.includes('mp4a')
+                ? 'video/mp4; codecs="hvc1.1.6.L120.90,mp4a.40.2"'
+                : 'video/mp4; codecs="hvc1.1.6.L120.90"',
+              targetType.includes('mp4a')
+                ? 'video/mp4; codecs="hev1,mp4a.40.2"'
+                : 'video/mp4; codecs="hev1"',
+              'video/mp4; codecs="hevc"'
+            ];
+            for (const fb of fallbacks) {
+              try {
+                const sb = origAddSourceBuffer.call(this, fb);
+                attachBufferEviction(sb);
+                return sb;
+              } catch {
+                /* ignore */
+              }
             }
           }
           throw err1;
@@ -324,13 +411,17 @@ export function patchMediaCodecs() {
       const patchedManagedAddSourceBuffer = function (type) {
         let targetType = type;
         try {
-          return origManagedAddSourceBuffer.call(this, targetType);
+          const sb = origManagedAddSourceBuffer.call(this, targetType);
+          attachBufferEviction(sb);
+          return sb;
         } catch (err1) {
           if (typeof targetType === 'string' && isHevcCodec(targetType)) {
             const cleaned = cleanHevcCodec(targetType);
             if (cleaned !== targetType) {
               try {
-                return origManagedAddSourceBuffer.call(this, cleaned);
+                const sb = origManagedAddSourceBuffer.call(this, cleaned);
+                attachBufferEviction(sb);
+                return sb;
               } catch {
                 /* ignore */
               }
@@ -339,9 +430,47 @@ export function patchMediaCodecs() {
               ? cleaned.replace(/hev1/g, 'hvc1')
               : cleaned.replace(/hvc1/g, 'hev1');
             try {
-              return origManagedAddSourceBuffer.call(this, swapped);
+              const sb = origManagedAddSourceBuffer.call(this, swapped);
+              attachBufferEviction(sb);
+              return sb;
             } catch {
               /* ignore */
+            }
+
+            const normalized = swapped.replace(
+              /(hvc1\.[1-9]\d*\.[\da-fA-F]+\.)L(?:15\d|16\d|17\d|18\d)(\.[\da-fA-F]+)?/g,
+              '$1L123$2'
+            );
+            if (normalized !== swapped) {
+              try {
+                const sb = origManagedAddSourceBuffer.call(this, normalized);
+                attachBufferEviction(sb);
+                return sb;
+              } catch {
+                /* ignore */
+              }
+            }
+
+            const fallbacks = [
+              targetType.includes('mp4a')
+                ? 'video/mp4; codecs="hvc1,mp4a.40.2"'
+                : 'video/mp4; codecs="hvc1"',
+              targetType.includes('mp4a')
+                ? 'video/mp4; codecs="hvc1.1.6.L120.90,mp4a.40.2"'
+                : 'video/mp4; codecs="hvc1.1.6.L120.90"',
+              targetType.includes('mp4a')
+                ? 'video/mp4; codecs="hev1,mp4a.40.2"'
+                : 'video/mp4; codecs="hev1"',
+              'video/mp4; codecs="hevc"'
+            ];
+            for (const fb of fallbacks) {
+              try {
+                const sb = origManagedAddSourceBuffer.call(this, fb);
+                attachBufferEviction(sb);
+                return sb;
+              } catch {
+                /* ignore */
+              }
             }
           }
           throw err1;
@@ -395,6 +524,20 @@ export function patchMediaCodecs() {
                 : cleaned.replace(/hvc1/g, 'hev1');
               const swappedRes = origCanPlayType.call(this, swapped);
               if (swappedRes) return swappedRes;
+
+              const normalized = swapped.replace(
+                /(hvc1\.[1-9]\d*\.[\da-fA-F]+\.)L(?:15\d|16\d|17\d|18\d)(\.[\da-fA-F]+)?/g,
+                '$1L123$2'
+              );
+              if (normalized !== swapped) {
+                const normRes = origCanPlayType.call(this, normalized);
+                if (normRes) return normRes;
+              }
+              const genRes = origCanPlayType.call(
+                this,
+                'video/mp4; codecs="hvc1"'
+              );
+              if (genRes) return genRes;
             }
           } catch {
             /* ignore */

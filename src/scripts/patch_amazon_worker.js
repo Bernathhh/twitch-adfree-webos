@@ -54,6 +54,19 @@ if (
           if (origIsTypeSupported.call(self.MediaSource, swapped)) {
             return true;
           }
+          const normalized = swapped.replace(
+            /(hvc1\.[1-9]\d*\.[\da-fA-F]+\.)L(?:15\d|16\d|17\d|18\d)(\.[\da-fA-F]+)?/g,
+            '$1L123$2'
+          );
+          if (
+            normalized !== swapped &&
+            origIsTypeSupported.call(self.MediaSource, normalized)
+          ) {
+            return true;
+          }
+          if (origIsTypeSupported.call(self.MediaSource, 'video/mp4; codecs="hvc1"')) {
+            return true;
+          }
         }
       } catch {
         /* ignore */
@@ -93,6 +106,35 @@ if (
           return origAddSourceBuffer.call(this, swapped);
         } catch {
           /* ignore */
+        }
+
+        const normalized = swapped.replace(
+          /(hvc1\.[1-9]\d*\.[\da-fA-F]+\.)L(?:15\d|16\d|17\d|18\d)(\.[\da-fA-F]+)?/g,
+          '$1L123$2'
+        );
+        if (normalized !== swapped) {
+          try {
+            return origAddSourceBuffer.call(this, normalized);
+          } catch {
+            /* ignore */
+          }
+        }
+
+        const fallbacks = [
+          targetType.includes('mp4a')
+            ? 'video/mp4; codecs="hvc1,mp4a.40.2"'
+            : 'video/mp4; codecs="hvc1"',
+          targetType.includes('mp4a')
+            ? 'video/mp4; codecs="hvc1.1.6.L120.90,mp4a.40.2"'
+            : 'video/mp4; codecs="hvc1.1.6.L120.90"',
+          'video/mp4; codecs="hevc"'
+        ];
+        for (const fb of fallbacks) {
+          try {
+            return origAddSourceBuffer.call(this, fb);
+          } catch {
+            /* ignore */
+          }
         }
       }
       throw err;
@@ -272,7 +314,15 @@ function patchManifest(manifest) {
   // 2. Normalize hev1 -> hvc1 for webOS Chromium MSE compatibility
   cleaned = cleaned.replace(/hev1/g, 'hvc1');
 
-  // 3. Strip any AV1 variants (av01 / av1) to avoid software decoding / freezing
+  // 3. Normalize Level 5.0+ (L150/L153) to Level 4.1 (L123) for webOS MSE compatibility
+  // WebOS Chromium caps supported HEVC levels at Level 4.1 in its MSE table;
+  // the TV hardware decoder natively handles 1440p60/4K60 once SourceBuffer is opened.
+  cleaned = cleaned.replace(
+    /(hvc1\.[1-9]\d*\.[\da-fA-F]+\.)L(?:15\d|16\d|17\d|18\d)(\.[\da-fA-F]+)?/g,
+    '$1L123$2'
+  );
+
+  // 4. Strip any AV1 variants (av01 / av1) to avoid software decoding / freezing
   if (cleaned.includes('av01') || cleaned.includes('av1')) {
     const lines = cleaned.split(/\r?\n/);
     const filteredLines = [];

@@ -346,7 +346,15 @@ export function patchManifest(manifest) {
   // 2. Normalize hev1 -> hvc1 for webOS Chromium MSE compatibility
   cleaned = cleaned.replace(/hev1/g, 'hvc1');
 
-  // 3. Strip any AV1 variants (av01 / av1) to avoid software decoding / freezing
+  // 3. Normalize Level 5.0+ (L150/L153) to Level 4.1 (L123) for webOS MSE compatibility
+  // WebOS Chromium caps supported HEVC levels at Level 4.1 in its MSE table;
+  // the TV hardware decoder natively handles 1440p60/4K60 once SourceBuffer is opened.
+  cleaned = cleaned.replace(
+    /(hvc1\.[1-9]\d*\.[\da-fA-F]+\.)L(?:15\d|16\d|17\d|18\d)(\.[\da-fA-F]+)?/g,
+    '$1L123$2'
+  );
+
+  // 4. Strip any AV1 variants (av01 / av1) to avoid software decoding / freezing
   if (cleaned.includes('av01') || cleaned.includes('av1')) {
     const lines = cleaned.split(/\r?\n/);
     const filteredLines = [];
