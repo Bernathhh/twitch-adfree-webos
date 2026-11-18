@@ -30,10 +30,87 @@
 }
 
 .taf-subtitle {
-  margin: 0 0 24px 0;
+  margin: 0 0 16px 0;
   color: #adadb8;
   font-size: 1.5rem;
   text-align: center;
+}
+
+.taf-quick-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.taf-action-btn {
+  background: rgba(145, 71, 255, 0.2);
+  color: #fff;
+  border: 1px solid rgba(145, 71, 255, 0.5);
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-size: 1.5rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease-in-out;
+}
+
+.taf-action-btn:hover,
+.taf-action-btn:focus {
+  background: #9147ff;
+  border-color: #b583ff;
+  outline: 2px solid #b583ff !important;
+  outline-offset: 2px;
+  transform: translateY(-1px);
+}
+
+.taf-btn-close {
+  background: rgba(255, 70, 70, 0.2);
+  border-color: rgba(255, 70, 70, 0.5);
+}
+
+.taf-btn-close:hover,
+.taf-btn-close:focus {
+  background: #e91e63;
+  border-color: #ff5722;
+}
+
+.taf-floating-btn {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  z-index: 9999;
+  background: rgba(20, 20, 25, 0.85);
+  color: #fff;
+  border: 1px solid #9147ff;
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 1.4rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  opacity: 0.75;
+  transition: opacity 0.2s, transform 0.2s;
+}
+
+.taf-floating-btn:hover,
+.taf-floating-btn:focus {
+  opacity: 1;
+  transform: scale(1.05);
+  outline: 2px solid #b583ff;
+}
+
+.taf-floating-badge {
+  background: #2e7d32;
+  color: #fff;
+  font-size: 1.1rem;
+  padding: 2px 6px;
+  border-radius: 4px;
 }
 
 .taf-options-list {

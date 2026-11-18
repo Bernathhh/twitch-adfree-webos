@@ -15,6 +15,15 @@ import {
   isHevcCodec,
   patchMediaCodecs
 } from '../src/scripts/media_codecs.js';
+import {
+  isInputFocused,
+  isGreenKey,
+  isYellowKey,
+  isRedKey,
+  isBlueKey,
+  isBackKey,
+  getKeyColor
+} from '../src/scripts/remote_keys.js';
 
 test('isLivePlaylistUrl matches live usher HLS endpoints and ignores others', () => {
   assert.equal(
@@ -316,4 +325,114 @@ test('XHR and fetch proxying intercepts usher requests and falls back to proxy7 
   // Restore
   globalThis.window = originalWindow;
   globalThis.fetch = originalFetch;
+});
+
+test('isGreenKey detects all webOS green button variations and keyboard fallbacks', () => {
+  assert.equal(isGreenKey(null), false);
+  assert.equal(isGreenKey(undefined), false);
+
+  // webOS remote key codes
+  assert.equal(isGreenKey({ keyCode: 404 }), true);
+  assert.equal(isGreenKey({ keyCode: 172 }), true);
+  assert.equal(isGreenKey({ which: 404 }), true);
+  assert.equal(isGreenKey({ which: 172 }), true);
+
+  // webOS and modern DOM event keys
+  assert.equal(isGreenKey({ key: 'ColorF1Green' }), true);
+  assert.equal(isGreenKey({ key: 'Green' }), true);
+  assert.equal(isGreenKey({ code: 'ColorF1Green' }), true);
+  assert.equal(isGreenKey({ key: 'F2' }), true);
+
+  // Keyboard shortcut 'g'/'G' when no input is focused
+  assert.equal(isGreenKey({ key: 'g' }), true);
+  assert.equal(isGreenKey({ key: 'G' }), true);
+
+  // Non-green keys
+  assert.equal(isGreenKey({ keyCode: 403 }), false); // Red
+  assert.equal(isGreenKey({ keyCode: 405 }), false); // Yellow
+  assert.equal(isGreenKey({ keyCode: 461 }), false); // Back
+  assert.equal(isGreenKey({ key: 'Enter' }), false);
+});
+
+test('isYellowKey, isRedKey, isBlueKey detect their respective remote color buttons', () => {
+  // Yellow
+  assert.equal(isYellowKey({ keyCode: 405 }), true);
+  assert.equal(isYellowKey({ keyCode: 170 }), true);
+  assert.equal(isYellowKey({ key: 'ColorF2Yellow' }), true);
+  assert.equal(isYellowKey({ key: 'Yellow' }), true);
+  assert.equal(isYellowKey({ key: 'F3' }), true);
+  assert.equal(isYellowKey({ key: 'y' }), true);
+  assert.equal(isYellowKey({ keyCode: 404 }), false);
+
+  // Red
+  assert.equal(isRedKey({ keyCode: 403 }), true);
+  assert.equal(isRedKey({ key: 'ColorF0Red' }), true);
+  assert.equal(isRedKey({ key: 'Red' }), true);
+  assert.equal(isRedKey({ key: 'F1' }), true);
+  assert.equal(isRedKey({ keyCode: 405 }), false);
+
+  // Blue
+  assert.equal(isBlueKey({ keyCode: 406 }), true);
+  assert.equal(isBlueKey({ keyCode: 191 }), true);
+  assert.equal(isBlueKey({ key: 'ColorF3Blue' }), true);
+  assert.equal(isBlueKey({ key: 'Blue' }), true);
+  assert.equal(isBlueKey({ key: 'F4' }), true);
+  assert.equal(isBlueKey({ keyCode: 404 }), false);
+});
+
+test('isBackKey detects webOS Back button and escape variations', () => {
+  assert.equal(isBackKey({ keyCode: 461 }), true);
+  assert.equal(isBackKey({ keyCode: 27 }), true);
+  assert.equal(isBackKey({ keyCode: 10009 }), true);
+  assert.equal(isBackKey({ key: 'Back' }), true);
+  assert.equal(isBackKey({ key: 'GoBack' }), true);
+  assert.equal(isBackKey({ key: 'Escape' }), true);
+
+  assert.equal(isBackKey({ keyCode: 13 }), false);
+  assert.equal(isBackKey({ keyCode: 404 }), false);
+  assert.equal(isBackKey(null), false);
+});
+
+test('getKeyColor correctly resolves color name from code and event', () => {
+  assert.equal(getKeyColor(404), 'green');
+  assert.equal(getKeyColor(172), 'green');
+  assert.equal(getKeyColor(403), 'red');
+  assert.equal(getKeyColor(405), 'yellow');
+  assert.equal(getKeyColor(170), 'yellow');
+  assert.equal(getKeyColor(406), 'blue');
+  assert.equal(getKeyColor(191), 'blue');
+
+  assert.equal(getKeyColor(0, { key: 'ColorF1Green' }), 'green');
+  assert.equal(getKeyColor(0, { key: 'ColorF2Yellow' }), 'yellow');
+  assert.equal(getKeyColor(0, { key: 'ColorF0Red' }), 'red');
+  assert.equal(getKeyColor(0, { key: 'ColorF3Blue' }), 'blue');
+
+  assert.equal(getKeyColor(999), null);
+  assert.equal(getKeyColor(13), null);
+});
+
+test('isInputFocused correctly detects focused text inputs', () => {
+  // When no document is present in Node
+  assert.equal(isInputFocused(), false);
+
+  // With a mock document
+  const origDoc = globalThis.document;
+  globalThis.document = /** @type {any} */ ({
+    activeElement: { tagName: 'INPUT' }
+  });
+  assert.equal(isInputFocused(), true);
+
+  globalThis.document.activeElement = { tagName: 'TEXTAREA' };
+  assert.equal(isInputFocused(), true);
+
+  globalThis.document.activeElement = { tagName: 'DIV', isContentEditable: true };
+  assert.equal(isInputFocused(), true);
+
+  globalThis.document.activeElement = { tagName: 'BUTTON' };
+  assert.equal(isInputFocused(), false);
+
+  globalThis.document.activeElement = null;
+  assert.equal(isInputFocused(), false);
+
+  globalThis.document = origDoc;
 });

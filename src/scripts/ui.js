@@ -20,6 +20,7 @@ import {
   CHAT_OVERLAY_TRANSPARENCY,
   USE_CUSTOM_PROXY,
   PRIMARY_PROXY,
+  PRIMARY_PROXY_OPTIONS,
   PROXY_SERVER_KEYS,
   ACTION_RESET_CONFIG
 } from '../constants/config.constants.js';
@@ -86,17 +87,29 @@ const LOGGED_OUT_NAVIGATION_MAP = {
   52: SEARCH_SELECTOR // 4 button
 };
 
-const ARROW_KEY_CODE = { 37: 'left', 38: 'up', 39: 'right', 40: 'down' };
+import {
+  ARROW_KEY_CODE,
+  colorCodeMap,
+  isInputFocused,
+  isGreenKey,
+  isYellowKey,
+  isRedKey,
+  isBlueKey,
+  isBackKey,
+  getKeyColor
+} from './remote_keys.js';
 
-const colorCodeMap = new Map([
-  [403, 'red'],
-  [404, 'green'],
-  [172, 'green'],
-  [405, 'yellow'],
-  [170, 'yellow'],
-  [406, 'blue'],
-  [191, 'blue']
-]);
+export {
+  ARROW_KEY_CODE,
+  colorCodeMap,
+  isInputFocused,
+  isGreenKey,
+  isYellowKey,
+  isRedKey,
+  isBlueKey,
+  isBackKey,
+  getKeyColor
+};
 
 // Global variables
 let configOptionKeys = null;
@@ -162,17 +175,64 @@ function applyChatSizing() {
   }
 }
 
-/**
- * Returns the name of the color button associated with a code or null if not a color button.
- * @param {number} keyCode KeyboardEvent.keyCode property from event
- * @returns {string | null} Color name or null
- */
-function getKeyColor(keyCode) {
-  if (colorCodeMap.has(keyCode)) {
-    return colorCodeMap.get(keyCode);
+export function cycleNextProxy() {
+  const current = String(
+    configRead(PRIMARY_PROXY) || PRIMARY_PROXY_OPTIONS[0]
+  );
+  const idx = PRIMARY_PROXY_OPTIONS.indexOf(current);
+  const nextIdx =
+    idx === -1 ? 0 : (idx + 1) % PRIMARY_PROXY_OPTIONS.length;
+  const nextProxy = PRIMARY_PROXY_OPTIONS[nextIdx];
+
+  configWrite(PRIMARY_PROXY, nextProxy);
+  configWrite(USE_CUSTOM_PROXY, true);
+
+  const valueSpans = document.querySelectorAll('.taf-proxy-value-span');
+  valueSpans.forEach((span) => {
+    span.textContent = nextProxy;
+  });
+
+  showNotification(`Прокси переключен: ${nextProxy}`, 3000, 'info');
+  return nextProxy;
+}
+
+export function reloadTwitchStream() {
+  const videos = getPlayerVideos(true);
+  let handled = false;
+  videos.forEach((video) => {
+    try {
+      if (video.currentTime > 0) {
+        video.currentTime = Math.max(0, video.currentTime - 0.2);
+      }
+      const playPromise = video.play();
+      if (playPromise && typeof playPromise.catch === 'function') {
+        playPromise.catch(() => {
+          /* ignore */
+        });
+      }
+      handled = true;
+    } catch {
+      /* ignore */
+    }
+  });
+
+  const playBtn = document.querySelector(
+    'button[data-a-target="player-play-pause-button"]'
+  );
+  if (playBtn) {
+    const label = (playBtn.getAttribute('aria-label') || '').toLowerCase();
+    if (label.includes('play') || label.includes('воспроизведение')) {
+      playBtn.click();
+      handled = true;
+    }
   }
 
-  return null;
+  showNotification(
+    handled ? 'Перезапуск видео...' : 'Видео не найдено',
+    3000,
+    'info'
+  );
+  return handled;
 }
 
 function createConfigCheckbox(key) {
@@ -277,6 +337,9 @@ function createConfigCheckbox(key) {
     incBtn.textContent = '▶';
     valueSpan = document.createElement('span');
     valueSpan.classList.add('taf-number-value');
+    if (key === PRIMARY_PROXY) {
+      valueSpan.classList.add('taf-proxy-value-span');
+    }
     valueSpan.textContent = String(configRead(key));
 
     const getDelta = () => {
@@ -350,39 +413,99 @@ function createOptionsPanel() {
   elmContainer.setAttribute('aria-modal', 'true');
   elmContainer.setAttribute('aria-label', 'Twitch AdFree Settings');
 
-  // Array para almacenar todos los elementos enfocables
-  const focusableElements = [];
-
   elmContainer.addEventListener(
     'keydown',
     (evt) => {
-      if (getKeyColor(evt.keyCode) === 'green') return;
-
-      const focusables = Array.from(
-        elmContainer.querySelectorAll(
-          '.taf-ui-container input[type="checkbox"], .taf-ui-container input[type="text"], .taf-ui-container button'
-        )
-      ).filter((el) => el.offsetParent !== null);
+      if (isGreenKey(evt) || isBackKey(evt)) {
+        evt.preventDefault();
+        evt.stopPropagation();
+        showOptionsPanel(false);
+        return;
+      }
 
       if (evt.keyCode in ARROW_KEY_CODE) {
         const direction = ARROW_KEY_CODE[evt.keyCode];
-        const currentIndex = focusables.indexOf(document.activeElement);
-        let nextIndex = currentIndex;
+        const active = document.activeElement;
 
-        // If no element is focused, start from the first focusable element
-        if (['down', 'right'].includes(direction)) {
-          nextIndex = (currentIndex + 1) % focusables.length;
-        } else if (['up', 'left'].includes(direction)) {
-          nextIndex =
-            (currentIndex - 1 + focusables.length) % focusables.length;
+        // If inside an arrow-adjusted config row:
+        const arrowContainer = active
+          ? active.closest('.taf-number-arrows')
+          : null;
+        if (arrowContainer) {
+          const decBtn = arrowContainer.querySelector('button:first-of-type');
+          const incBtn = arrowContainer.querySelector('button:last-of-type');
+          if (direction === 'left' && decBtn) {
+            decBtn.click();
+            decBtn.focus();
+            evt.preventDefault();
+            evt.stopPropagation();
+            return;
+          }
+          if (direction === 'right' && incBtn) {
+            incBtn.click();
+            incBtn.focus();
+            evt.preventDefault();
+            evt.stopPropagation();
+            return;
+          }
         }
 
-        focusables[nextIndex].focus();
+        // If inside quick actions bar:
+        const quickBar = active ? active.closest('.taf-quick-actions') : null;
+        if (quickBar && (direction === 'left' || direction === 'right')) {
+          const qButtons = Array.from(quickBar.querySelectorAll('button'));
+          const qIdx = qButtons.indexOf(active);
+          if (qIdx !== -1) {
+            const nextQIdx =
+              direction === 'right'
+                ? (qIdx + 1) % qButtons.length
+                : (qIdx - 1 + qButtons.length) % qButtons.length;
+            qButtons[nextQIdx].focus();
+            evt.preventDefault();
+            evt.stopPropagation();
+            return;
+          }
+        }
+
+        // Standard linear/row navigation with Up / Down (or Left / Right outside special cases)
+        const focusables = Array.from(
+          elmContainer.querySelectorAll(
+            'button, input[type="checkbox"], input[type="text"]'
+          )
+        ).filter((el) => el.offsetParent !== null && !el.disabled);
+
+        if (focusables.length === 0) return;
+
+        const currentIndex = focusables.indexOf(active);
+        let nextIndex = currentIndex;
+
+        if (['down', 'right'].includes(direction)) {
+          nextIndex =
+            currentIndex === -1 ? 0 : (currentIndex + 1) % focusables.length;
+        } else if (['up', 'left'].includes(direction)) {
+          nextIndex =
+            currentIndex === -1
+              ? focusables.length - 1
+              : (currentIndex - 1 + focusables.length) % focusables.length;
+        }
+
+        const nextEl = focusables[nextIndex];
+        if (nextEl) {
+          nextEl.focus();
+          if (typeof nextEl.scrollIntoView === 'function') {
+            nextEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+          }
+        }
         evt.preventDefault();
         evt.stopPropagation();
       } else if (evt.keyCode === 13) {
-        // Enter
-        document.activeElement.click();
+        // Enter / OK button on remote
+        if (
+          document.activeElement &&
+          typeof document.activeElement.click === 'function'
+        ) {
+          document.activeElement.click();
+        }
         evt.preventDefault();
         evt.stopPropagation();
       }
@@ -398,10 +521,57 @@ function createOptionsPanel() {
 
   const elmSubtitle = document.createElement('p');
   elmSubtitle.textContent =
-    'Press [GREEN] to close; use buttons to adjust settings';
+    'Press [GREEN] or [BACK] to close; use D-pad to navigate';
   elmSubtitle.classList.add('taf-subtitle');
   elmContainer.appendChild(header);
   elmContainer.appendChild(elmSubtitle);
+
+  // Quick Actions Bar
+  const quickActions = document.createElement('div');
+  quickActions.classList.add('taf-quick-actions');
+
+  const reloadBtn = document.createElement('button');
+  reloadBtn.type = 'button';
+  reloadBtn.classList.add('taf-action-btn');
+  reloadBtn.textContent = '🔄 Перезапустить видео';
+  reloadBtn.title = 'Перезапустить текущее воспроизведение';
+  reloadBtn.addEventListener('click', () => {
+    reloadTwitchStream();
+  });
+
+  const chatBtn = document.createElement('button');
+  chatBtn.type = 'button';
+  chatBtn.classList.add('taf-action-btn');
+  chatBtn.textContent = '💬 Чат (Yellow)';
+  chatBtn.title = 'Показать / скрыть чат (кнопка Yellow)';
+  chatBtn.addEventListener('click', () => {
+    toggleTwitchChat();
+  });
+
+  const proxyBtn = document.createElement('button');
+  proxyBtn.type = 'button';
+  proxyBtn.classList.add('taf-action-btn');
+  proxyBtn.textContent = '🛡️ Сменить прокси';
+  proxyBtn.title = 'Быстро переключить прокси-сервер';
+  proxyBtn.addEventListener('click', () => {
+    cycleNextProxy();
+  });
+
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.classList.add('taf-action-btn', 'taf-btn-close');
+  closeBtn.textContent = '❌ Закрыть';
+  closeBtn.title = 'Закрыть меню настроек (Green / Back)';
+  closeBtn.addEventListener('click', () => {
+    showOptionsPanel(false);
+  });
+
+  quickActions.appendChild(reloadBtn);
+  quickActions.appendChild(chatBtn);
+  quickActions.appendChild(proxyBtn);
+  quickActions.appendChild(closeBtn);
+
+  elmContainer.appendChild(quickActions);
 
   // Options list
   const optionsList = document.createElement('div');
@@ -414,9 +584,10 @@ function createOptionsPanel() {
   configOptionKeys.forEach((option) => {
     const checkboxContainer = createConfigCheckbox(option);
     const checkboxInput = checkboxContainer.querySelector('input');
-    checkboxInput.tabIndex = 0; // Make checkbox focusable
+    if (checkboxInput) {
+      checkboxInput.tabIndex = 0; // Make checkbox focusable
+    }
     optionsList.appendChild(checkboxContainer);
-    focusableElements.push(checkboxInput);
   });
 
   // Proxy server URLs are only relevant while "Use proxy servers" is enabled
@@ -447,7 +618,7 @@ function createOptionsPanel() {
   return elmContainer;
 }
 
-const optionsPanel = createOptionsPanel();
+export const optionsPanel = createOptionsPanel();
 const attachOptionsPanel = () => {
   const root = document.body || document.documentElement;
   if (root && optionsPanel && !optionsPanel.parentNode) {
@@ -468,12 +639,19 @@ let optionsPanelVisible = false;
  * Show or hide the options panel.
  * @param {boolean} [visible=true] Whether to show the options panel.
  */
-function showOptionsPanel(visible) {
+export function showOptionsPanel(visible) {
   visible ??= true;
 
   if (visible && !optionsPanelVisible) {
-    optionsPanel.style.display = 'block';
-    optionsPanel.focus();
+    optionsPanel.style.display = 'flex';
+    const firstFocusable = optionsPanel.querySelector(
+      'button, input[type="checkbox"], input[type="text"]'
+    );
+    if (firstFocusable) {
+      firstFocusable.focus();
+    } else {
+      optionsPanel.focus();
+    }
     optionsPanelVisible = true;
   } else if (!visible && optionsPanelVisible) {
     optionsPanel.style.display = 'none';
@@ -488,7 +666,7 @@ window.taf_showOptionsPanel = showOptionsPanel;
  * Toggles chat visibility by clicking Twitch's own collapse/expand button,
  * so the real chat state is toggled (rather than just hiding the chat element).
  */
-function toggleTwitchChat() {
+export function toggleTwitchChat() {
   const toggleButton = document.querySelector(CHAT_TOGGLE_SELECTOR);
   if (toggleButton) {
     toggleButton.click();
@@ -506,25 +684,39 @@ function handleNumberButtonsClick(keyCode) {
 }
 
 const eventHandler = (evt) => {
-  if (Object.keys(LOGGED_IN_NAVIGATION_MAP).includes(String(evt.keyCode))) {
+  if (optionsPanelVisible) {
+    if (isBackKey(evt) || isGreenKey(evt)) {
+      evt.preventDefault();
+      evt.stopPropagation();
+      if (evt.type === 'keydown') {
+        showOptionsPanel(false);
+      }
+      return false;
+    }
+    return true;
+  }
+
+  if (
+    !isInputFocused() &&
+    Object.keys(LOGGED_IN_NAVIGATION_MAP).includes(String(evt.keyCode))
+  ) {
     handleNumberButtonsClick(evt.keyCode);
     evt.preventDefault();
     evt.stopPropagation();
     return false;
   }
 
-  if (getKeyColor(evt.keyCode) === 'green') {
+  if (isGreenKey(evt)) {
     evt.preventDefault();
     evt.stopPropagation();
 
     if (evt.type === 'keydown') {
-      // Toggle visibility.
       showOptionsPanel(!optionsPanelVisible);
     }
     return false;
   }
 
-  if (getKeyColor(evt.keyCode) === 'yellow') {
+  if (isYellowKey(evt)) {
     evt.preventDefault();
     evt.stopPropagation();
 
@@ -838,11 +1030,31 @@ function initChatOverlay() {
   });
 }
 
+export function createFloatingSettingsButton() {
+  if (document.querySelector('.taf-floating-btn')) return;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.classList.add('taf-floating-btn');
+  btn.setAttribute('aria-label', 'Open Twitch AdFree Settings');
+  btn.innerHTML = '⚙ <span class="taf-floating-badge">Green</span>';
+  btn.tabIndex = 0;
+  btn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    showOptionsPanel(!optionsPanelVisible);
+  });
+  const root = document.body || document.documentElement;
+  if (root) {
+    root.appendChild(btn);
+  }
+}
+
 function init() {
   handleAdsAndConsentModals();
   initRemoveAnimations();
   initKeyListeners();
   initChatOverlay();
+  createFloatingSettingsButton();
 
   showNotification('Press [GREEN] button to open configuration', 5000, 'info');
 }
