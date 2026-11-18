@@ -1,7 +1,11 @@
 import { configRead } from '../config';
 import { USE_CUSTOM_PROXY } from '../constants/config.constants';
 import { APP_VERSION } from '../constants/global.constants';
-import { getProxyServers, installUsherXhrPatch } from './patch_usher_xhr';
+import {
+  getProxyServers,
+  getRawAuthToken,
+  installUsherXhrPatch
+} from './patch_usher_xhr';
 import patchAmazonWorkerCode from './patch_amazon_worker.js?raw';
 
 const patchAmazonWorkerUrl =
@@ -31,10 +35,12 @@ installUsherXhrPatch();
 
       const useProxy = configRead(USE_CUSTOM_PROXY);
       const proxyServers = getProxyServers();
+      const rawAuth = getRawAuthToken();
 
       const workerInjectedHeader = `
         useProxy = ${JSON.stringify(useProxy)};
         proxyServers = ${JSON.stringify(proxyServers)};
+        authToken = ${JSON.stringify(rawAuth)};
       `;
 
       const blobParts = [workerInjectedHeader];

@@ -1,7 +1,23 @@
 // Source: https://github.com/besuper/TwitchNoSub
-/* global useProxy, proxyServers */
+/* global useProxy, proxyServers, authToken */
 
-// Disable AV1 on MediaSource if worker supports it
+function isAv1Codec(type) {
+  if (typeof type !== 'string') {
+    return false;
+  }
+  const lower = type.toLowerCase();
+  return lower.includes('av01') || (lower.includes('av1') && !lower.includes('avc1'));
+}
+
+function isHevcCodec(type) {
+  if (typeof type !== 'string') {
+    return false;
+  }
+  const lower = type.toLowerCase();
+  return lower.includes('hev1') || lower.includes('hvc1');
+}
+
+// Disable AV1 on MediaSource and ensure HEVC is supported if worker supports it
 if (
   typeof self !== 'undefined' &&
   self.MediaSource &&
@@ -9,13 +25,61 @@ if (
 ) {
   const origIsTypeSupported = self.MediaSource.isTypeSupported;
   self.MediaSource.isTypeSupported = function (type) {
-    if (typeof type === 'string') {
-      const lower = type.toLowerCase();
-      if (lower.includes('av01') || lower.includes('av1')) {
-        return false;
+    if (isAv1Codec(type)) {
+      return false;
+    }
+    if (isHevcCodec(type)) {
+      try {
+        if (origIsTypeSupported.call(self.MediaSource, type)) {
+          return true;
+        }
+        if (
+          typeof type === 'string' &&
+          type.includes('hev1') &&
+          origIsTypeSupported.call(
+            self.MediaSource,
+            type.replace(/hev1/g, 'hvc1')
+          )
+        ) {
+          return true;
+        }
+      } catch {
+        /* ignore */
       }
+      return true;
     }
     return origIsTypeSupported.call(this || self.MediaSource, type);
+  };
+}
+
+// Override MediaSource.prototype.addSourceBuffer to normalize hev1 -> hvc1
+if (
+  typeof self !== 'undefined' &&
+  self.MediaSource &&
+  self.MediaSource.prototype &&
+  typeof self.MediaSource.prototype.addSourceBuffer === 'function'
+) {
+  const origAddSourceBuffer = self.MediaSource.prototype.addSourceBuffer;
+  self.MediaSource.prototype.addSourceBuffer = function (type) {
+    let targetType = type;
+    if (typeof targetType === 'string' && targetType.includes('hev1')) {
+      targetType = targetType.replace(/hev1/g, 'hvc1');
+    }
+    try {
+      return origAddSourceBuffer.call(this, targetType);
+    } catch (err) {
+      if (typeof targetType === 'string' && isHevcCodec(targetType)) {
+        try {
+          const fallbackType = targetType.includes('mp4a')
+            ? 'video/mp4; codecs="hvc1,mp4a.40.2"'
+            : 'video/mp4; codecs="hvc1"';
+          return origAddSourceBuffer.call(this, fallbackType);
+        } catch {
+          /* ignore */
+        }
+      }
+      throw err;
+    }
   };
 }
 
@@ -180,35 +244,100 @@ function mergeOriginalQuery(target, originalUrl) {
  * @param {string} channel Channel login extracted from the original URL.
  * @returns {string} URL to request instead of the original one.
  */
+function patchManifest(manifest) {
+  if (typeof manifest !== 'string') {
+    return manifest;
+  }
+
+  // 1. Normalize hev1 -> hvc1 for webOS Chromium MSE compatibility
+  let cleaned = manifest.replace(/hev1/g, 'hvc1');
+
+  // 2. Strip any AV1 variants (av01 / av1) to avoid software decoding / freezing
+  if (cleaned.includes('av01') || cleaned.includes('av1')) {
+    const lines = cleaned.split(/\r?\n/);
+    const filteredLines = [];
+    const removedGroupIds = new Set();
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+
+      if (line.startsWith('#EXT-X-STREAM-INF:')) {
+        const isAv1 =
+          /CODECS="[^"]*(?:av01|av1)[^"]*"/i.test(line) &&
+          !/CODECS="[^"]*avc1[^"]*"/i.test(line);
+
+        if (isAv1) {
+          const videoMatch = line.match(/VIDEO="([^"]+)"/);
+          if (videoMatch && videoMatch[1]) {
+            removedGroupIds.add(videoMatch[1]);
+          }
+          if (i + 1 < lines.length && !lines[i + 1].startsWith('#')) {
+            i++;
+          }
+          continue;
+        }
+      }
+
+      filteredLines.push(line);
+    }
+
+    if (removedGroupIds.size > 0) {
+      cleaned = filteredLines
+        .filter((line) => {
+          if (line.startsWith('#EXT-X-MEDIA:TYPE=VIDEO')) {
+            const groupMatch = line.match(/GROUP-ID="([^"]+)"/);
+            if (groupMatch && removedGroupIds.has(groupMatch[1])) {
+              return false;
+            }
+          }
+          return true;
+        })
+        .join('\n');
+    } else {
+      cleaned = filteredLines.join('\n');
+    }
+  }
+
+  return cleaned;
+}
+
 function buildProxiedUrl(server, originalUrl, channel) {
   const trimmed = server.trim();
+  let result;
 
   if (trimmed.includes('$url') || trimmed.includes('{url}')) {
-    return trimmed
+    result = trimmed
       .split('$url')
       .join(originalUrl)
       .split('{url}')
       .join(originalUrl);
-  }
-
-  if (trimmed.includes('$channel') || trimmed.includes('{channel}')) {
+  } else if (trimmed.includes('$channel') || trimmed.includes('{channel}')) {
     const target = trimmed
       .split('$channel')
       .join(channel)
       .split('{channel}')
       .join(channel);
-    return mergeOriginalQuery(target, originalUrl);
-  }
-
-  // URL-prefix proxy: append the full target URL after the base.
-  if (!trimmed.includes('.m3u8')) {
-    return trimmed.endsWith('/')
+    result = mergeOriginalQuery(target, originalUrl);
+  } else if (!trimmed.includes('.m3u8')) {
+    result = trimmed.endsWith('/')
       ? trimmed + originalUrl
       : `${trimmed}/${originalUrl}`;
+  } else {
+    result = mergeOriginalQuery(trimmed, originalUrl);
   }
 
-  // Legacy full-URL template (e.g. https://proxy.tld/https://usher...): merge token.
-  return mergeOriginalQuery(trimmed, originalUrl);
+  if (result.includes('rte.net.ru')) {
+    if (typeof authToken === 'string' && authToken && !result.includes('auth=')) {
+      const sep = result.includes('?') ? '&' : '?';
+      result = `${result}${sep}auth=${encodeURIComponent(authToken)}`;
+    }
+    if (!result.includes('hide_audio_only=')) {
+      const sep = result.includes('?') ? '&' : '?';
+      result = `${result}${sep}hide_audio_only=true`;
+    }
+  }
+
+  return result;
 }
 
 const oldFetch = self.fetch;
@@ -321,7 +450,16 @@ self.fetch = async function (input, opt) {
           // eslint-disable-next-line no-await-in-loop
           const proxied = await oldFetch(request, opt);
           if (proxied && proxied.ok) {
-            return proxied;
+            // eslint-disable-next-line no-await-in-loop
+            const text = await proxied.text();
+            const patched = patchManifest(text);
+            const headers = new Headers(proxied.headers);
+            headers.set('content-type', 'application/vnd.apple.mpegurl');
+            return new Response(patched, {
+              status: proxied.status,
+              statusText: proxied.statusText,
+              headers
+            });
           }
           console.warn(
             `Proxy server returned HTTP ${proxied ? proxied.status : 'error'}, trying next:`,
@@ -335,6 +473,22 @@ self.fetch = async function (input, opt) {
   }
 
   let response = await oldFetch(input, opt);
+
+  if (isLivePlaylistUrl(url) && response && response.ok) {
+    try {
+      const text = await response.text();
+      const patched = patchManifest(text);
+      const headers = new Headers(response.headers);
+      headers.set('content-type', 'application/vnd.apple.mpegurl');
+      return new Response(patched, {
+        status: response.status,
+        statusText: response.statusText,
+        headers
+      });
+    } catch {
+      return response;
+    }
+  }
 
   if (url.startsWith('https://usher.ttvnw.net/vod/')) {
     if (response.status != 200) {

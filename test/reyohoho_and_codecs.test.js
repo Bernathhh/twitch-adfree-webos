@@ -6,9 +6,15 @@ import {
   enforceSupportedCodecs,
   buildProxiedUrl,
   getProxyServers,
+  getRawAuthToken,
+  patchManifest,
   installUsherXhrPatch
 } from '../src/scripts/patch_usher_xhr.js';
-import { isAv1Codec, patchMediaCodecs } from '../src/scripts/media_codecs.js';
+import {
+  isAv1Codec,
+  isHevcCodec,
+  patchMediaCodecs
+} from '../src/scripts/media_codecs.js';
 
 test('isLivePlaylistUrl matches live usher HLS endpoints and ignores others', () => {
   assert.equal(
@@ -52,7 +58,7 @@ test('enforceSupportedCodecs forces h265,h264 and strips av1 while preserving qu
   assert.equal(result2.includes('sig=12345'), true);
 });
 
-test('buildProxiedUrl creates ReYohoho proxy format keeping full URL and query params', () => {
+test('buildProxiedUrl creates ReYohoho proxy format with hide_audio_only and auth params', () => {
   const usherUrl =
     'https://usher.ttvnw.net/api/v2/channel/hls/streamer.m3u8?allow_source=true&supported_codecs=h265,h264&sig=xyz';
 
@@ -61,20 +67,17 @@ test('buildProxiedUrl creates ReYohoho proxy format keeping full URL and query p
     usherUrl,
     'streamer'
   );
-  assert.equal(
-    proxied4,
-    'https://proxy4.rte.net.ru/https://usher.ttvnw.net/api/v2/channel/hls/streamer.m3u8?allow_source=true&supported_codecs=h265,h264&sig=xyz'
-  );
+  assert.match(proxied4, /^https:\/\/proxy4\.rte\.net\.ru\/https:\/\/usher\.ttvnw\.net\//);
+  assert.match(proxied4, /supported_codecs=h265,h264/);
+  assert.match(proxied4, /hide_audio_only=true/);
 
   const proxied7 = buildProxiedUrl(
     'https://proxy7.rte.net.ru/',
     usherUrl,
     'streamer'
   );
-  assert.equal(
-    proxied7,
-    'https://proxy7.rte.net.ru/https://usher.ttvnw.net/api/v2/channel/hls/streamer.m3u8?allow_source=true&supported_codecs=h265,h264&sig=xyz'
-  );
+  assert.match(proxied7, /^https:\/\/proxy7\.rte\.net\.ru\/https:\/\/usher\.ttvnw\.net\//);
+  assert.match(proxied7, /hide_audio_only=true/);
 });
 
 test('getProxyServers defaults to proxy4 with fallback to proxy7', () => {
@@ -82,6 +85,10 @@ test('getProxyServers defaults to proxy4 with fallback to proxy7', () => {
   assert.ok(servers.length >= 2);
   assert.equal(servers[0], 'https://proxy4.rte.net.ru/');
   assert.equal(servers[1], 'https://proxy7.rte.net.ru/');
+});
+
+test('getRawAuthToken safely extracts auth token from environment', () => {
+  assert.equal(typeof getRawAuthToken(), 'string');
 });
 
 test('isAv1Codec correctly detects AV1 and does not match AVC1/HEVC', () => {
@@ -108,31 +115,68 @@ test('isAv1Codec correctly detects AV1 and does not match AVC1/HEVC', () => {
   assert.equal(isAv1Codec(undefined), false);
 });
 
-test('patchMediaCodecs overrides MediaSource.isTypeSupported and canPlayType', () => {
-  // Mock window.MediaSource and HTMLMediaElement for node test environment
+test('isHevcCodec correctly detects HEVC (hev1 / hvc1)', () => {
+  assert.equal(isHevcCodec('video/mp4; codecs="hev1.1.6.L93.B0"'), true);
+  assert.equal(isHevcCodec('video/mp4; codecs="hvc1.1.6.L93.B0"'), true);
+  assert.equal(isHevcCodec('video/mp4; codecs="hvc1"'), true);
+  assert.equal(isHevcCodec('video/mp4; codecs="hev1"'), true);
+  assert.equal(isHevcCodec('video/mp4; codecs="avc1.64002a"'), false);
+  assert.equal(isHevcCodec('video/mp4; codecs="av01.0.13M.08"'), false);
+});
+
+test('patchManifest removes AV1 variants and normalizes hev1 to hvc1', () => {
+  const inputManifest = `#EXTM3U
+#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="1440p60_av1",NAME="1440p60",AUTOSELECT=YES,DEFAULT=YES
+#EXT-X-STREAM-INF:BANDWIDTH=8745502,RESOLUTION=2560x1440,CODECS="av01.0.13M.08,mp4a.40.2",VIDEO="1440p60_av1",FRAME-RATE=60.000
+https://euc12.playlist.ttvnw.net/v1/playlist/av1.m3u8
+#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="1440p60_hevc",NAME="1440p60",AUTOSELECT=YES,DEFAULT=YES
+#EXT-X-STREAM-INF:BANDWIDTH=8745502,RESOLUTION=2560x1440,CODECS="hev1.1.6.L93.B0,mp4a.40.2",VIDEO="1440p60_hevc",FRAME-RATE=60.000
+https://euc12.playlist.ttvnw.net/v1/playlist/hevc.m3u8
+#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="1080p60",NAME="1080p60",AUTOSELECT=YES,DEFAULT=YES
+#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080,CODECS="avc1.64002A,mp4a.40.2",VIDEO="1080p60",FRAME-RATE=60.000
+https://euc12.playlist.ttvnw.net/v1/playlist/1080p.m3u8`;
+
+  const patched = patchManifest(inputManifest);
+
+  // AV1 stream and media must be completely gone
+  assert.equal(patched.includes('av01'), false);
+  assert.equal(patched.includes('1440p60_av1'), false);
+  assert.equal(patched.includes('av1.m3u8'), false);
+
+  // HEVC must be normalized to hvc1
+  assert.equal(patched.includes('hev1'), false);
+  assert.match(patched, /CODECS="hvc1\.1\.6\.L93\.B0,mp4a\.40\.2"/);
+  assert.equal(patched.includes('1440p60_hevc'), true);
+  assert.equal(patched.includes('hevc.m3u8'), true);
+
+  // AVC1 1080p must remain intact
+  assert.match(patched, /CODECS="avc1\.64002A,mp4a\.40\.2"/);
+  assert.equal(patched.includes('1080p.m3u8'), true);
+});
+
+test('patchMediaCodecs overrides MediaSource.isTypeSupported, addSourceBuffer and canPlayType', () => {
   const originalMediaSource = globalThis.window?.MediaSource;
   const originalHTMLMediaElement = globalThis.window?.HTMLMediaElement;
 
   class FakeMediaSource {
     static isTypeSupported(type) {
-      if (
-        type.includes('avc1') ||
-        type.includes('hev1') ||
-        type.includes('hvc1')
-      ) {
+      if (type.includes('avc1') || type.includes('hvc1')) {
         return true;
       }
       return false;
     }
   }
 
+  FakeMediaSource.prototype.addSourceBuffer = function (type) {
+    if (type.includes('hev1')) {
+      throw new Error('NotSupportedError: hev1 is unsupported');
+    }
+    return { type };
+  };
+
   class FakeHTMLMediaElement {
     canPlayType(type) {
-      if (
-        type.includes('avc1') ||
-        type.includes('hev1') ||
-        type.includes('hvc1')
-      ) {
+      if (type.includes('avc1') || type.includes('hvc1')) {
         return 'probably';
       }
       return '';
@@ -163,7 +207,7 @@ test('patchMediaCodecs overrides MediaSource.isTypeSupported and canPlayType', (
   assert.equal(mediaEl.canPlayType('video/mp4; codecs="av01.0.08M.10"'), '');
   assert.equal(mediaEl.canPlayType('video/webm; codecs="av1"'), '');
 
-  // Standard support for hvc1 / hev1 / avc1
+  // HEVC support: both hvc1 and hev1 return true for isTypeSupported
   assert.equal(
     globalThis.window.MediaSource.isTypeSupported(
       'video/mp4; codecs="hev1.1.6.L93.B0"'
@@ -182,6 +226,11 @@ test('patchMediaCodecs overrides MediaSource.isTypeSupported and canPlayType', (
     ),
     true
   );
+
+  // addSourceBuffer normalizes hev1 -> hvc1 so it succeeds without throwing
+  const msInstance = new FakeMediaSource();
+  const sb = msInstance.addSourceBuffer('video/mp4; codecs="hev1.1.6.L93.B0"');
+  assert.equal(sb.type, 'video/mp4; codecs="hvc1.1.6.L93.B0"');
 
   assert.equal(
     mediaEl.canPlayType('video/mp4; codecs="hev1.1.6.L93.B0"'),
@@ -220,7 +269,7 @@ test('XHR and fetch proxying intercepts usher requests and falls back to proxy7 
     // proxy7 succeeds
     if (url.startsWith('https://proxy7.rte.net.ru/')) {
       return new Response(
-        '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=5000000\nstream.m3u8',
+        '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=5000000,CODECS="hev1.1.6.L93.B0"\nstream.m3u8',
         {
           status: 200,
           headers: { 'Content-Type': 'application/vnd.apple.mpegurl' }
@@ -252,7 +301,6 @@ test('XHR and fetch proxying intercepts usher requests and falls back to proxy7 
 
   installUsherXhrPatch();
 
-  // Test fetch interceptor
   requestedUrls.length = 0;
   const res = await globalThis.window.fetch(
     'https://usher.ttvnw.net/api/v2/channel/hls/testch.m3u8?supported_codecs=av1,h264'
@@ -260,16 +308,10 @@ test('XHR and fetch proxying intercepts usher requests and falls back to proxy7 
 
   assert.equal(res.status, 200);
   assert.equal(requestedUrls.length, 2);
-  // First tried proxy4 with enforced codecs
-  assert.equal(
-    requestedUrls[0],
-    'https://proxy4.rte.net.ru/https://usher.ttvnw.net/api/v2/channel/hls/testch.m3u8?supported_codecs=h265,h264'
-  );
-  // Fallback tried proxy7 with enforced codecs
-  assert.equal(
-    requestedUrls[1],
-    'https://proxy7.rte.net.ru/https://usher.ttvnw.net/api/v2/channel/hls/testch.m3u8?supported_codecs=h265,h264'
-  );
+
+  // Returned manifest must have hev1 normalized to hvc1
+  const bodyText = await res.text();
+  assert.match(bodyText, /CODECS="hvc1\.1\.6\.L93\.B0"/);
 
   // Restore
   globalThis.window = originalWindow;

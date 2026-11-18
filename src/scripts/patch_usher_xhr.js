@@ -303,33 +303,132 @@ function mergeOriginalQuery(target, originalUrl) {
   return (mergedQuery === '' ? base : `${base}?${mergedQuery}`) + hash;
 }
 
+export function getRawAuthToken() {
+  try {
+    if (typeof document !== 'undefined' && document.cookie) {
+      const match = document.cookie.match(/(?:^|;\s*)auth-token=([^;]+)/);
+      if (match && match[1]) {
+        return decodeURIComponent(match[1]).replace(/^OAuth\s+/i, '').trim();
+      }
+    }
+    if (typeof localStorage !== 'undefined') {
+      const lsToken =
+        localStorage.getItem('auth-token') ||
+        localStorage.getItem('oauth_token') ||
+        localStorage.getItem('twilight.jaeger.token');
+      if (lsToken) {
+        return lsToken.replace(/^OAuth\s+/i, '').replace(/^"|"$/g, '').trim();
+      }
+    }
+    if (typeof sessionStorage !== 'undefined') {
+      const ssToken =
+        sessionStorage.getItem('auth-token') ||
+        sessionStorage.getItem('oauth_token');
+      if (ssToken) {
+        return ssToken.replace(/^OAuth\s+/i, '').replace(/^"|"$/g, '').trim();
+      }
+    }
+  } catch {
+    // Ignore storage access errors in restricted contexts
+  }
+  return '';
+}
+
+export function patchManifest(manifest) {
+  if (typeof manifest !== 'string') {
+    return manifest;
+  }
+
+  // 1. Normalize hev1 -> hvc1 for webOS Chromium MSE compatibility
+  let cleaned = manifest.replace(/hev1/g, 'hvc1');
+
+  // 2. Strip any AV1 variants (av01 / av1) to avoid software decoding / freezing
+  if (cleaned.includes('av01') || cleaned.includes('av1')) {
+    const lines = cleaned.split(/\r?\n/);
+    const filteredLines = [];
+    const removedGroupIds = new Set();
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+
+      if (line.startsWith('#EXT-X-STREAM-INF:')) {
+        const isAv1 =
+          /CODECS="[^"]*(?:av01|av1)[^"]*"/i.test(line) &&
+          !/CODECS="[^"]*avc1[^"]*"/i.test(line);
+
+        if (isAv1) {
+          const videoMatch = line.match(/VIDEO="([^"]+)"/);
+          if (videoMatch && videoMatch[1]) {
+            removedGroupIds.add(videoMatch[1]);
+          }
+          if (i + 1 < lines.length && !lines[i + 1].startsWith('#')) {
+            i++;
+          }
+          continue;
+        }
+      }
+
+      filteredLines.push(line);
+    }
+
+    if (removedGroupIds.size > 0) {
+      cleaned = filteredLines
+        .filter((line) => {
+          if (line.startsWith('#EXT-X-MEDIA:TYPE=VIDEO')) {
+            const groupMatch = line.match(/GROUP-ID="([^"]+)"/);
+            if (groupMatch && removedGroupIds.has(groupMatch[1])) {
+              return false;
+            }
+          }
+          return true;
+        })
+        .join('\n');
+    } else {
+      cleaned = filteredLines.join('\n');
+    }
+  }
+
+  return cleaned;
+}
+
 export function buildProxiedUrl(server, originalUrl, channel) {
   const trimmed = server.trim();
+  let result;
 
   if (trimmed.includes('$url') || trimmed.includes('{url}')) {
-    return trimmed
+    result = trimmed
       .split('$url')
       .join(originalUrl)
       .split('{url}')
       .join(originalUrl);
-  }
-
-  if (trimmed.includes('$channel') || trimmed.includes('{channel}')) {
+  } else if (trimmed.includes('$channel') || trimmed.includes('{channel}')) {
     const target = trimmed
       .split('$channel')
       .join(channel)
       .split('{channel}')
       .join(channel);
-    return mergeOriginalQuery(target, originalUrl);
-  }
-
-  if (!trimmed.includes('.m3u8')) {
-    return trimmed.endsWith('/')
+    result = mergeOriginalQuery(target, originalUrl);
+  } else if (!trimmed.includes('.m3u8')) {
+    result = trimmed.endsWith('/')
       ? trimmed + originalUrl
       : `${trimmed}/${originalUrl}`;
+  } else {
+    result = mergeOriginalQuery(trimmed, originalUrl);
   }
 
-  return mergeOriginalQuery(trimmed, originalUrl);
+  if (result.includes('rte.net.ru')) {
+    const authToken = getRawAuthToken();
+    if (authToken && !result.includes('auth=')) {
+      const sep = result.includes('?') ? '&' : '?';
+      result = `${result}${sep}auth=${encodeURIComponent(authToken)}`;
+    }
+    if (!result.includes('hide_audio_only=')) {
+      const sep = result.includes('?') ? '&' : '?';
+      result = `${result}${sep}hide_audio_only=true`;
+    }
+  }
+
+  return result;
 }
 
 export function isLivePlaylistUrl(url) {
@@ -410,7 +509,7 @@ async function proxyLivePlaylist(xhr, originalUrl, fallback) {
           respondWith(
             xhr,
             response.status,
-            playlistBody,
+            patchManifest(playlistBody),
             'application/vnd.apple.mpegurl'
           );
           return;
@@ -423,6 +522,23 @@ async function proxyLivePlaylist(xhr, originalUrl, fallback) {
         console.warn('[TAF] Proxy server failed for live playback', server, e);
       }
     }
+  }
+
+  // Direct usher fallback with manifest patching
+  try {
+    const directResp = await fetch(targetUrl);
+    if (directResp.ok) {
+      const directText = await directResp.text();
+      respondWith(
+        xhr,
+        directResp.status,
+        patchManifest(directText),
+        'application/vnd.apple.mpegurl'
+      );
+      return;
+    }
+  } catch (e) {
+    console.warn('[TAF] Direct usher fallback failed', e);
   }
 
   fallback();
@@ -551,7 +667,16 @@ export function installUsherXhrPatch() {
               // eslint-disable-next-line no-await-in-loop
               const proxied = await oldFetch(request, opt);
               if (proxied && proxied.ok) {
-                return proxied;
+                // eslint-disable-next-line no-await-in-loop
+                const text = await proxied.text();
+                const patched = patchManifest(text);
+                const headers = new Headers(proxied.headers);
+                headers.set('content-type', 'application/vnd.apple.mpegurl');
+                return new Response(patched, {
+                  status: proxied.status,
+                  statusText: proxied.statusText,
+                  headers
+                });
               }
               console.warn(
                 `[TAF] Proxy server returned HTTP ${proxied ? proxied.status : 'error'} in fetch, trying next:`,
@@ -565,7 +690,23 @@ export function installUsherXhrPatch() {
 
         const fallbackReq =
           input instanceof Request ? new Request(targetUrl, input) : targetUrl;
-        return oldFetch(fallbackReq, opt);
+        try {
+          const directResp = await oldFetch(fallbackReq, opt);
+          if (directResp && directResp.ok) {
+            const text = await directResp.text();
+            const patched = patchManifest(text);
+            const headers = new Headers(directResp.headers);
+            headers.set('content-type', 'application/vnd.apple.mpegurl');
+            return new Response(patched, {
+              status: directResp.status,
+              statusText: directResp.statusText,
+              headers
+            });
+          }
+          return directResp;
+        } catch {
+          return oldFetch(fallbackReq, opt);
+        }
       }
 
       return oldFetch(input, opt);
