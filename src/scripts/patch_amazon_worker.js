@@ -55,7 +55,7 @@ if (
             return true;
           }
           const normalized = swapped.replace(
-            /(hvc1\.[1-9]\d*\.[\da-fA-F]+\.)L(?:15\d|16\d|17\d|18\d)(\.[\da-fA-F]+)?/g,
+            /(hvc1\.[1-9]\d*\.[\da-fA-F]+\.)[LH](?:15\d|16\d|17\d|18\d)(\.[\da-fA-F]+)?/g,
             '$1L123$2'
           );
           if (
@@ -109,7 +109,7 @@ if (
         }
 
         const normalized = swapped.replace(
-          /(hvc1\.[1-9]\d*\.[\da-fA-F]+\.)L(?:15\d|16\d|17\d|18\d)(\.[\da-fA-F]+)?/g,
+          /(hvc1\.[1-9]\d*\.[\da-fA-F]+\.)[LH](?:15\d|16\d|17\d|18\d)(\.[\da-fA-F]+)?/g,
           '$1L123$2'
         );
         if (normalized !== swapped) {
@@ -314,11 +314,11 @@ function patchManifest(manifest) {
   // 2. Normalize hev1 -> hvc1 for webOS Chromium MSE compatibility
   cleaned = cleaned.replace(/hev1/g, 'hvc1');
 
-  // 3. Normalize Level 5.0+ (L150/L153) to Level 4.1 (L123) for webOS MSE compatibility
+  // 3. Normalize Level 5.0+ (L150/L153/H150/H153) to Level 4.1 (L123) for webOS MSE compatibility
   // WebOS Chromium caps supported HEVC levels at Level 4.1 in its MSE table;
   // the TV hardware decoder natively handles 1440p60/4K60 once SourceBuffer is opened.
   cleaned = cleaned.replace(
-    /(hvc1\.[1-9]\d*\.[\da-fA-F]+\.)L(?:15\d|16\d|17\d|18\d)(\.[\da-fA-F]+)?/g,
+    /(hvc1\.[1-9]\d*\.[\da-fA-F]+\.)[LH](?:15\d|16\d|17\d|18\d)(\.[\da-fA-F]+)?/g,
     '$1L123$2'
   );
 
@@ -373,41 +373,31 @@ function patchManifest(manifest) {
 
 function buildProxiedUrl(server, originalUrl, channel) {
   const trimmed = server.trim();
-  let result;
 
   if (trimmed.includes('$url') || trimmed.includes('{url}')) {
-    result = trimmed
+    return trimmed
       .split('$url')
       .join(originalUrl)
       .split('{url}')
       .join(originalUrl);
-  } else if (trimmed.includes('$channel') || trimmed.includes('{channel}')) {
+  }
+
+  if (trimmed.includes('$channel') || trimmed.includes('{channel}')) {
     const target = trimmed
       .split('$channel')
       .join(channel)
       .split('{channel}')
       .join(channel);
-    result = mergeOriginalQuery(target, originalUrl);
-  } else if (!trimmed.includes('.m3u8')) {
-    result = trimmed.endsWith('/')
+    return mergeOriginalQuery(target, originalUrl);
+  }
+
+  if (!trimmed.includes('.m3u8')) {
+    return trimmed.endsWith('/')
       ? trimmed + originalUrl
       : `${trimmed}/${originalUrl}`;
-  } else {
-    result = mergeOriginalQuery(trimmed, originalUrl);
   }
 
-  if (result.includes('rte.net.ru')) {
-    if (typeof authToken === 'string' && authToken && !result.includes('auth=')) {
-      const sep = result.includes('?') ? '&' : '?';
-      result = `${result}${sep}auth=${encodeURIComponent(authToken)}`;
-    }
-    if (!result.includes('hide_audio_only=')) {
-      const sep = result.includes('?') ? '&' : '?';
-      result = `${result}${sep}hide_audio_only=true`;
-    }
-  }
-
-  return result;
+  return mergeOriginalQuery(trimmed, originalUrl);
 }
 
 const oldFetch = self.fetch;
@@ -470,7 +460,7 @@ self.fetch = async function (input, opt) {
     }
   }
 
-  function fetchWithTimeout(req, options = {}, timeoutMs = 2500) {
+  function fetchWithTimeout(req, options = {}, timeoutMs = 8000) {
     if (typeof AbortController === 'undefined') {
       return oldFetch(req, options);
     }
@@ -533,7 +523,7 @@ self.fetch = async function (input, opt) {
 
         try {
           // eslint-disable-next-line no-await-in-loop
-          const proxied = await fetchWithTimeout(request, opt, 2500);
+          const proxied = await fetchWithTimeout(request, opt, 8000);
           if (proxied && proxied.ok) {
             // eslint-disable-next-line no-await-in-loop
             const text = await proxied.text();

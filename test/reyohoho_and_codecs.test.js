@@ -76,7 +76,7 @@ test('enforceSupportedCodecs forces h265,h264 and strips av1 while preserving qu
   assert.equal(result2.includes('sig=12345'), true);
 });
 
-test('buildProxiedUrl creates ReYohoho proxy format with hide_audio_only and auth params', () => {
+test('buildProxiedUrl creates ReYohoho proxy format matching upstream 1.6.6', () => {
   const usherUrl =
     'https://usher.ttvnw.net/api/v2/channel/hls/streamer.m3u8?allow_source=true&supported_codecs=h265,h264&sig=xyz';
 
@@ -85,17 +85,21 @@ test('buildProxiedUrl creates ReYohoho proxy format with hide_audio_only and aut
     usherUrl,
     'streamer'
   );
-  assert.match(proxied4, /^https:\/\/proxy4\.rte\.net\.ru\/https:\/\/usher\.ttvnw\.net\//);
+  assert.match(
+    proxied4,
+    /^https:\/\/proxy4\.rte\.net\.ru\/https:\/\/usher\.ttvnw\.net\//
+  );
   assert.match(proxied4, /supported_codecs=h265,h264/);
-  assert.match(proxied4, /hide_audio_only=true/);
 
   const proxied7 = buildProxiedUrl(
     'https://proxy7.rte.net.ru/',
     usherUrl,
     'streamer'
   );
-  assert.match(proxied7, /^https:\/\/proxy7\.rte\.net\.ru\/https:\/\/usher\.ttvnw\.net\//);
-  assert.match(proxied7, /hide_audio_only=true/);
+  assert.match(
+    proxied7,
+    /^https:\/\/proxy7\.rte\.net\.ru\/https:\/\/usher\.ttvnw\.net\//
+  );
 });
 
 test('getProxyServers defaults to proxy4 with fallback to proxy7', () => {
@@ -229,8 +233,8 @@ test('patchMediaCodecs overrides MediaSource.isTypeSupported, addSourceBuffer an
   }
 
   FakeMediaSource.prototype.addSourceBuffer = function (type) {
-    if (type.includes('hev1')) {
-      throw new Error('NotSupportedError: hev1 is unsupported');
+    if (type.includes('hev1') || type.includes('L15') || type.includes('H15')) {
+      throw new Error('NotSupportedError: hev1/Level 5+ is unsupported');
     }
     return { type };
   };
@@ -288,10 +292,20 @@ test('patchMediaCodecs overrides MediaSource.isTypeSupported, addSourceBuffer an
     true
   );
 
-  // addSourceBuffer normalizes hev1 -> hvc1 so it succeeds without throwing
+  // addSourceBuffer normalizes hev1 -> hvc1 and Level 5.0+ to L123 so it succeeds without throwing
   const msInstance = new FakeMediaSource();
   const sb = msInstance.addSourceBuffer('video/mp4; codecs="hev1.1.6.L93.B0"');
   assert.equal(sb.type, 'video/mp4; codecs="hvc1.1.6.L93.B0"');
+
+  const sb1440p = msInstance.addSourceBuffer(
+    'video/mp4; codecs="hev1.1.6.L150.90"'
+  );
+  assert.equal(sb1440p.type, 'video/mp4; codecs="hvc1.1.6.L123.90"');
+
+  const sb4k = msInstance.addSourceBuffer(
+    'video/mp4; codecs="hev1.1.6.H153.B0"'
+  );
+  assert.equal(sb4k.type, 'video/mp4; codecs="hvc1.1.6.L123.B0"');
 
   assert.equal(
     mediaEl.canPlayType('video/mp4; codecs="hev1.1.6.L93.B0"'),
@@ -537,9 +551,9 @@ test('isInputFocused correctly detects focused text inputs', () => {
   globalThis.document = origDoc;
 });
 
-test('LOAD_EMOTES, ENABLE_CHAT_OVERLAY and USE_CUSTOM_PROXY default to false', () => {
+test('LOAD_EMOTES and ENABLE_CHAT_OVERLAY default to false, USE_CUSTOM_PROXY defaults to true', () => {
   assert.equal(configOptions[LOAD_EMOTES].default, false);
   assert.equal(configOptions[ENABLE_CHAT_OVERLAY].default, false);
-  assert.equal(configOptions[USE_CUSTOM_PROXY].default, false);
+  assert.equal(configOptions[USE_CUSTOM_PROXY].default, true);
 });
 

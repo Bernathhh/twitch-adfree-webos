@@ -91,7 +91,7 @@ export function checkHevcSupported(origFn, context, type) {
       // If webOS MSE rejects Level 5.0+ (L150/L153) due to Chromium level table,
       // check with normalized Level 4.1 (L123) or generic hvc1:
       const normalized = swapped.replace(
-        /(hvc1\.[1-9]\d*\.[\da-fA-F]+\.)L(?:15\d|16\d|17\d|18\d)(\.[\da-fA-F]+)?/g,
+        /(hvc1\.[1-9]\d*\.[\da-fA-F]+\.)[LH](?:15\d|16\d|17\d|18\d)(\.[\da-fA-F]+)?/g,
         '$1L123$2'
       );
       if (normalized !== swapped && origFn.call(context, normalized)) {
@@ -111,38 +111,19 @@ export function checkHevcSupported(origFn, context, type) {
 }
 
 /**
- * Attaches safe back-buffer pruning to a SourceBuffer on updateend
- * to prevent TV RAM exhaustion and decoder freezes on 1440p60.
+ * No-op retained for backwards compatibility.
+ * External buffer eviction via sb.remove() interferes with hls.js internal queue
+ * causing InvalidStateError and video freezes on webOS.
  *
  * @param {unknown} sb
  */
-export function attachBufferEviction(sb) {
-  try {
-    if (!sb || typeof sb.addEventListener !== 'function') return;
-    sb.addEventListener('updateend', () => {
-      try {
-        if (!sb.updating && sb.buffered && sb.buffered.length > 0) {
-          const video = document.querySelector('video');
-          if (video && video.currentTime > 0) {
-            const start = sb.buffered.start(0);
-            // Evict back-buffer older than 12 seconds to save TV RAM on 1440p60
-            if (video.currentTime - start > 12) {
-              sb.remove(start, video.currentTime - 6);
-            }
-          }
-        }
-      } catch {
-        /* ignore */
-      }
-    });
-  } catch {
-    /* ignore */
-  }
+export function attachBufferEviction(_sb) {
+  // Deliberately no-op: hls.js manages its own buffer lifecycle
 }
 
 /**
- * Automatically detects video playback stalls (frozen frame / buffer gap)
- * and attempts a micro-seek or auto-fallback to stable quality (1080p / Auto).
+ * Automatically detects video playback stalls (frozen frame / decoder lock)
+ * and attempts a gentle resume or auto-fallback to stable quality (1080p / Auto).
  */
 export function initStallWatchdog() {
   if (typeof window === 'undefined') return;
@@ -162,7 +143,7 @@ export function initStallWatchdog() {
       }
 
       // If video is actively loading network data (readyState < 3 and networkState == 2),
-      // it is legitimate buffering: do not seek or interfere.
+      // it is legitimate buffering: do not interfere.
       if (video.readyState < 3 && video.networkState === 2) {
         return;
       }
@@ -171,34 +152,10 @@ export function initStallWatchdog() {
       if (cur > 0 && Math.abs(cur - lastTime) < 0.05) {
         stallDuration++;
 
-        // After 4 seconds of stall: attempt gentle buffer gap recovery
+        // After 4 seconds of stall: attempt gentle play without mutating currentTime
         if (stallDuration === 4) {
-          console.warn(
-            '[TAF] Video stall detected at ' +
-              cur.toFixed(2) +
-              's, checking buffer...'
-          );
-          let jumpedHole = false;
-          if (video.buffered && video.buffered.length > 0) {
-            for (let i = 0; i < video.buffered.length; i++) {
-              const bStart = video.buffered.start(i);
-              if (bStart > cur && bStart - cur < 3) {
-                video.currentTime = bStart + 0.05;
-                const p = video.play();
-                if (p && p.catch) p.catch(() => {});
-                jumpedHole = true;
-                break;
-              }
-            }
-          }
-          if (!jumpedHole && video.buffered && video.buffered.length > 0) {
-            const end = video.buffered.end(video.buffered.length - 1);
-            if (end > cur + 0.5) {
-              video.currentTime = Math.min(end - 0.2, cur + 0.1);
-              const p = video.play();
-              if (p && p.catch) p.catch(() => {});
-            }
-          }
+          const p = video.play();
+          if (p && typeof p.catch === 'function') p.catch(() => {});
         }
 
         // After 8 seconds of unrecoverable freeze (e.g. 1440p decoder failure):
@@ -316,17 +273,13 @@ export function patchMediaCodecs() {
       const patchedAddSourceBuffer = function (type) {
         let targetType = type;
         try {
-          const sb = origAddSourceBuffer.call(this, targetType);
-          attachBufferEviction(sb);
-          return sb;
+          return origAddSourceBuffer.call(this, targetType);
         } catch (err1) {
           if (typeof targetType === 'string' && isHevcCodec(targetType)) {
             const cleaned = cleanHevcCodec(targetType);
             if (cleaned !== targetType) {
               try {
-                const sb = origAddSourceBuffer.call(this, cleaned);
-                attachBufferEviction(sb);
-                return sb;
+                return origAddSourceBuffer.call(this, cleaned);
               } catch {
                 /* ignore */
               }
@@ -335,22 +288,18 @@ export function patchMediaCodecs() {
               ? cleaned.replace(/hev1/g, 'hvc1')
               : cleaned.replace(/hvc1/g, 'hev1');
             try {
-              const sb = origAddSourceBuffer.call(this, swapped);
-              attachBufferEviction(sb);
-              return sb;
+              return origAddSourceBuffer.call(this, swapped);
             } catch {
               /* ignore */
             }
 
             const normalized = swapped.replace(
-              /(hvc1\.[1-9]\d*\.[\da-fA-F]+\.)L(?:15\d|16\d|17\d|18\d)(\.[\da-fA-F]+)?/g,
+              /(hvc1\.[1-9]\d*\.[\da-fA-F]+\.)[LH](?:15\d|16\d|17\d|18\d)(\.[\da-fA-F]+)?/g,
               '$1L123$2'
             );
             if (normalized !== swapped) {
               try {
-                const sb = origAddSourceBuffer.call(this, normalized);
-                attachBufferEviction(sb);
-                return sb;
+                return origAddSourceBuffer.call(this, normalized);
               } catch {
                 /* ignore */
               }
@@ -370,9 +319,7 @@ export function patchMediaCodecs() {
             ];
             for (const fb of fallbacks) {
               try {
-                const sb = origAddSourceBuffer.call(this, fb);
-                attachBufferEviction(sb);
-                return sb;
+                return origAddSourceBuffer.call(this, fb);
               } catch {
                 /* ignore */
               }
@@ -411,17 +358,13 @@ export function patchMediaCodecs() {
       const patchedManagedAddSourceBuffer = function (type) {
         let targetType = type;
         try {
-          const sb = origManagedAddSourceBuffer.call(this, targetType);
-          attachBufferEviction(sb);
-          return sb;
+          return origManagedAddSourceBuffer.call(this, targetType);
         } catch (err1) {
           if (typeof targetType === 'string' && isHevcCodec(targetType)) {
             const cleaned = cleanHevcCodec(targetType);
             if (cleaned !== targetType) {
               try {
-                const sb = origManagedAddSourceBuffer.call(this, cleaned);
-                attachBufferEviction(sb);
-                return sb;
+                return origManagedAddSourceBuffer.call(this, cleaned);
               } catch {
                 /* ignore */
               }
@@ -430,22 +373,18 @@ export function patchMediaCodecs() {
               ? cleaned.replace(/hev1/g, 'hvc1')
               : cleaned.replace(/hvc1/g, 'hev1');
             try {
-              const sb = origManagedAddSourceBuffer.call(this, swapped);
-              attachBufferEviction(sb);
-              return sb;
+              return origManagedAddSourceBuffer.call(this, swapped);
             } catch {
               /* ignore */
             }
 
             const normalized = swapped.replace(
-              /(hvc1\.[1-9]\d*\.[\da-fA-F]+\.)L(?:15\d|16\d|17\d|18\d)(\.[\da-fA-F]+)?/g,
+              /(hvc1\.[1-9]\d*\.[\da-fA-F]+\.)[LH](?:15\d|16\d|17\d|18\d)(\.[\da-fA-F]+)?/g,
               '$1L123$2'
             );
             if (normalized !== swapped) {
               try {
-                const sb = origManagedAddSourceBuffer.call(this, normalized);
-                attachBufferEviction(sb);
-                return sb;
+                return origManagedAddSourceBuffer.call(this, normalized);
               } catch {
                 /* ignore */
               }
@@ -465,9 +404,7 @@ export function patchMediaCodecs() {
             ];
             for (const fb of fallbacks) {
               try {
-                const sb = origManagedAddSourceBuffer.call(this, fb);
-                attachBufferEviction(sb);
-                return sb;
+                return origManagedAddSourceBuffer.call(this, fb);
               } catch {
                 /* ignore */
               }

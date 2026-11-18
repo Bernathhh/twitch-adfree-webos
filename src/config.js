@@ -1,6 +1,7 @@
 import {
   CONFIG_KEY,
   PROXY_SERVER_1,
+  USE_CUSTOM_PROXY,
   configOptions
 } from './constants/config.constants.js';
 
@@ -65,7 +66,17 @@ function loadStoredConfig() {
 
   try {
     const parsed = JSON.parse(storage);
+    let modified = false;
     if (migrateLegacyCustomProxyUrl(parsed)) {
+      modified = true;
+    }
+    // If upgrading from 1.7.1/1.7.2 where proxy was disabled by default, restore 1.6.6 default
+    if (parsed && parsed.__proxyDefaultRestored_1_7_3 !== true) {
+      parsed.__proxyDefaultRestored_1_7_3 = true;
+      parsed[USE_CUSTOM_PROXY] = true;
+      modified = true;
+    }
+    if (modified) {
       window.localStorage.setItem(CONFIG_KEY, JSON.stringify(parsed));
     }
     return parsed;

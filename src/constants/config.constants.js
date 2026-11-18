@@ -88,7 +88,7 @@ export const configOptions = {
     desc: 'Chat overlay background transparency (0-100%)'
   },
   [USE_CUSTOM_PROXY]: {
-    default: false,
+    default: true,
     desc: 'Use proxy servers for HLS streaming (experimental)'
   },
   [PRIMARY_PROXY]: {
