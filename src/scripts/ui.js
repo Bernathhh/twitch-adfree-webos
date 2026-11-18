@@ -741,6 +741,32 @@ export function toggleTwitchChat() {
   }
 }
 
+let chatAutoCollapsed = false;
+let lastKnownLocation =
+  typeof window !== 'undefined' && window.location ? window.location.href : '';
+
+export function autoCollapseChatIfDisabled() {
+  if (configRead(ENABLE_CHAT_OVERLAY)) return;
+
+  const currentHref =
+    typeof window !== 'undefined' && window.location
+      ? window.location.href
+      : '';
+  if (currentHref && currentHref !== lastKnownLocation) {
+    lastKnownLocation = currentHref;
+    chatAutoCollapsed = false;
+  }
+
+  if (chatAutoCollapsed) return;
+
+  const toggleBtn = document.querySelector(CHAT_TOGGLE_SELECTOR);
+  const chatAside = document.querySelector('main > aside');
+  if (toggleBtn && chatAside) {
+    chatAutoCollapsed = true;
+    toggleBtn.click();
+  }
+}
+
 function handleNumberButtonsClick(keyCode) {
   const buttonSelector = document.querySelector(LOGIN_SELECTOR)
     ? LOGGED_OUT_NAVIGATION_MAP[keyCode]
@@ -1066,6 +1092,11 @@ function handleAdsAndConsentModals() {
     const posterElement = document.querySelector(latestVideo);
     if (posterElement) {
       posterElement.remove();
+    }
+
+    // Auto-collapse chat by default if chat overlay is disabled
+    if (!configRead(ENABLE_CHAT_OVERLAY)) {
+      autoCollapseChatIfDisabled();
     }
   });
 

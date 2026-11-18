@@ -59,11 +59,11 @@ export const configOptions = {
     desc: 'Display a notification when channel points are claimed'
   },
   [LOAD_EMOTES]: {
-    default: true,
+    default: false,
     desc: 'Enable loading of 7TV, BTTV, and FFZ emotes in chat'
   },
   [ENABLE_CHAT_OVERLAY]: {
-    default: true,
+    default: false,
     desc: 'Display chat as a transparent overlay on top of the video'
   },
   [CHAT_POSITION]: {

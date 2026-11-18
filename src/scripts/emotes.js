@@ -204,7 +204,7 @@ import { showNotification } from './ui';
 
   function observeChat() {
     const observer = new MutationObserver((mutations) => {
-      if (!document.querySelector(CHAT_SELECTOR)) {
+      if (!configRead(LOAD_EMOTES) || !document.querySelector(CHAT_SELECTOR)) {
         return;
       }
       mutations.forEach((mutation) => {

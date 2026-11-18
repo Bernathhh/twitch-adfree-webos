@@ -26,6 +26,11 @@ import {
   isBackKey,
   getKeyColor
 } from '../src/scripts/remote_keys.js';
+import {
+  configOptions,
+  LOAD_EMOTES,
+  ENABLE_CHAT_OVERLAY
+} from '../src/constants/config.constants.js';
 
 test('isLivePlaylistUrl matches live usher HLS endpoints and ignores others', () => {
   assert.equal(
@@ -470,3 +475,9 @@ test('isInputFocused correctly detects focused text inputs', () => {
 
   globalThis.document = origDoc;
 });
+
+test('LOAD_EMOTES and ENABLE_CHAT_OVERLAY default to false', () => {
+  assert.equal(configOptions[LOAD_EMOTES].default, false);
+  assert.equal(configOptions[ENABLE_CHAT_OVERLAY].default, false);
+});
+
