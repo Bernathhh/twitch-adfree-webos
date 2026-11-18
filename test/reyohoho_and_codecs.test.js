@@ -13,6 +13,8 @@ import {
 import {
   isAv1Codec,
   isHevcCodec,
+  cleanHevcCodec,
+  checkHevcSupported,
   patchMediaCodecs
 } from '../src/scripts/media_codecs.js';
 import {
@@ -133,13 +135,45 @@ test('isHevcCodec correctly detects HEVC (hev1 / hvc1)', () => {
   assert.equal(isHevcCodec('video/mp4; codecs="av01.0.13M.08"'), false);
 });
 
-test('patchManifest removes AV1 variants and normalizes hev1 to hvc1', () => {
+test('cleanHevcCodec trims non-standard trailing constraint tokens', () => {
+  assert.equal(
+    cleanHevcCodec('video/mp4; codecs="hev1.1.6.L150.90.0.0.0.0.0,mp4a.40.2"'),
+    'video/mp4; codecs="hev1.1.6.L150.90,mp4a.40.2"'
+  );
+  assert.equal(
+    cleanHevcCodec('video/mp4; codecs="hvc1.1.6.L150.90.0.0.0.0.0"'),
+    'video/mp4; codecs="hvc1.1.6.L150.90"'
+  );
+  assert.equal(
+    cleanHevcCodec('video/mp4; codecs="hvc1.1.6.L93.B0"'),
+    'video/mp4; codecs="hvc1.1.6.L93.B0"'
+  );
+});
+
+test('checkHevcSupported normalizes syntax and tests swapped FourCCs without spoofing levels', () => {
+  const origFn = (type) => type === 'video/mp4; codecs="hvc1.1.6.L150.90"';
+
+  assert.equal(
+    checkHevcSupported(
+      origFn,
+      null,
+      'video/mp4; codecs="hev1.1.6.L150.90.0.0.0.0.0"'
+    ),
+    true
+  );
+  assert.equal(
+    checkHevcSupported(origFn, null, 'video/mp4; codecs="hev1.1.6.L180.90"'),
+    false
+  );
+});
+
+test('patchManifest removes AV1 variants and cleans/normalizes hev1 to hvc1', () => {
   const inputManifest = `#EXTM3U
 #EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="1440p60_av1",NAME="1440p60",AUTOSELECT=YES,DEFAULT=YES
 #EXT-X-STREAM-INF:BANDWIDTH=8745502,RESOLUTION=2560x1440,CODECS="av01.0.13M.08,mp4a.40.2",VIDEO="1440p60_av1",FRAME-RATE=60.000
 https://euc12.playlist.ttvnw.net/v1/playlist/av1.m3u8
 #EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="1440p60_hevc",NAME="1440p60",AUTOSELECT=YES,DEFAULT=YES
-#EXT-X-STREAM-INF:BANDWIDTH=8745502,RESOLUTION=2560x1440,CODECS="hev1.1.6.L93.B0,mp4a.40.2",VIDEO="1440p60_hevc",FRAME-RATE=60.000
+#EXT-X-STREAM-INF:BANDWIDTH=8745502,RESOLUTION=2560x1440,CODECS="hev1.1.6.L150.90.0.0.0.0.0,mp4a.40.2",VIDEO="1440p60_hevc",FRAME-RATE=60.000
 https://euc12.playlist.ttvnw.net/v1/playlist/hevc.m3u8
 #EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="1080p60",NAME="1080p60",AUTOSELECT=YES,DEFAULT=YES
 #EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080,CODECS="avc1.64002A,mp4a.40.2",VIDEO="1080p60",FRAME-RATE=60.000
@@ -152,9 +186,9 @@ https://euc12.playlist.ttvnw.net/v1/playlist/1080p.m3u8`;
   assert.equal(patched.includes('1440p60_av1'), false);
   assert.equal(patched.includes('av1.m3u8'), false);
 
-  // HEVC must be normalized to hvc1
+  // HEVC must be cleaned and normalized to hvc1
   assert.equal(patched.includes('hev1'), false);
-  assert.match(patched, /CODECS="hvc1\.1\.6\.L93\.B0,mp4a\.40\.2"/);
+  assert.match(patched, /CODECS="hvc1\.1\.6\.L150\.90,mp4a\.40\.2"/);
   assert.equal(patched.includes('1440p60_hevc'), true);
   assert.equal(patched.includes('hevc.m3u8'), true);
 

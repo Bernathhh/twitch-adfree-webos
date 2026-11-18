@@ -1,12 +1,14 @@
 /**
  * Overrides MediaSource.isTypeSupported, MediaSource.prototype.addSourceBuffer,
- * SourceBuffer.prototype.appendBuffer, and HTMLMediaElement.prototype.canPlayType to:
+ * and HTMLMediaElement.prototype.canPlayType to:
  * 1. Report AV1 (av01 / av1) as unsupported so webOS avoids software AV1 decoding,
  *    which exhausts TV memory and freezes 1440p/4K streams.
  * 2. Handle hardware-accelerated HEVC / H.265 (hvc1 / hev1) by testing real browser
- *    support across FourCC variants (hev1 <-> hvc1) and profile levels.
- * 3. Prune old SourceBuffer segments to prevent TV buffer bloat / OOM freezes on 1440p/4K.
- * 4. Run an automatic stall detection watchdog that kicks playback when frozen on a frame/buffer gap.
+ *    support across FourCC variants (hev1 <-> hvc1) and standardizing RFC 6381 syntax.
+ * 3. Never spoof unsupported profile levels (e.g. L93 fallback for L150) so the TV
+ *    hardware is not forced into resolutions it cannot decode.
+ * 4. Run an automatic stall detection watchdog that safely recovers playback or
+ *    automatically drops back to stable 1080p / Auto if a high-res stream locks up.
  */
 
 /**
@@ -41,8 +43,28 @@ export function isHevcCodec(type) {
 }
 
 /**
+ * Cleans non-standard HEVC codec strings by trimming extra constraint tokens
+ * (e.g., Twitch Enhanced Broadcasting outputs hev1.1.6.L150.90.0.0.0.0.0).
+ * Standard Chromium / webOS parsers accept up to 5 dot-separated components.
+ *
+ * @param {string} type
+ * @returns {string}
+ */
+export function cleanHevcCodec(type) {
+  if (typeof type !== 'string') {
+    return type;
+  }
+  return type.replace(
+    /(hev1|hvc1)\.([1-9]\d*)\.([\da-fA-F]+)\.([LH]\d+)\.([\da-fA-F]+)(?:\.[\da-fA-F]+)+/g,
+    '$1.$2.$3.$4.$5'
+  );
+}
+
+/**
  * Checks whether HEVC is supported by trying original isTypeSupported with
- * hev1 <-> hvc1 normalization and standard profile strings.
+ * RFC 6381 normalization and hev1 <-> hvc1 FourCC swapping.
+ * Never falls back to a lower level (such as L93) when a higher level is queried,
+ * ensuring the TV hardware decoder is not forced into unsupported resolutions.
  *
  * @param {Function} origFn
  * @param {unknown} context
@@ -56,22 +78,14 @@ export function checkHevcSupported(origFn, context, type) {
       return true;
     }
     if (typeof type === 'string') {
-      const swapped = type.includes('hev1')
-        ? type.replace(/hev1/g, 'hvc1')
-        : type.replace(/hvc1/g, 'hev1');
+      const cleaned = cleanHevcCodec(type);
+      if (cleaned !== type && origFn.call(context, cleaned)) {
+        return true;
+      }
+      const swapped = cleaned.includes('hev1')
+        ? cleaned.replace(/hev1/g, 'hvc1')
+        : cleaned.replace(/hvc1/g, 'hev1');
       if (origFn.call(context, swapped)) {
-        return true;
-      }
-      const baseType = type.includes('mp4a')
-        ? 'video/mp4; codecs="hvc1.1.6.L93.B0,mp4a.40.2"'
-        : 'video/mp4; codecs="hvc1.1.6.L93.B0"';
-      if (origFn.call(context, baseType)) {
-        return true;
-      }
-      if (origFn.call(context, 'video/mp4; codecs="hvc1"')) {
-        return true;
-      }
-      if (origFn.call(context, 'video/mp4; codecs="hevc"')) {
         return true;
       }
     }
@@ -83,13 +97,14 @@ export function checkHevcSupported(origFn, context, type) {
 
 /**
  * Automatically detects video playback stalls (frozen frame / buffer gap)
- * and attempts a micro-seek / live-edge jump to unstick playback.
+ * and attempts a micro-seek or auto-fallback to stable quality (1080p / Auto).
  */
 export function initStallWatchdog() {
   if (typeof window === 'undefined') return;
 
   let lastTime = -1;
   let stallDuration = 0;
+  let recoveryAttempts = 0;
 
   const timer = setInterval(() => {
     try {
@@ -97,15 +112,27 @@ export function initStallWatchdog() {
       if (!video || video.paused || video.ended) {
         lastTime = -1;
         stallDuration = 0;
+        recoveryAttempts = 0;
+        return;
+      }
+
+      // If video is actively loading network data (readyState < 3 and networkState == 2),
+      // it is legitimate buffering: do not seek or interfere.
+      if (video.readyState < 3 && video.networkState === 2) {
         return;
       }
 
       const cur = video.currentTime;
       if (cur > 0 && Math.abs(cur - lastTime) < 0.05) {
         stallDuration++;
-        // If stalled for 3 consecutive seconds:
-        if (stallDuration >= 3) {
-          console.warn('[TAF] Video stall detected at ' + cur.toFixed(2) + 's, attempting recovery...');
+
+        // After 4 seconds of stall: attempt gentle buffer gap recovery
+        if (stallDuration === 4) {
+          console.warn(
+            '[TAF] Video stall detected at ' +
+              cur.toFixed(2) +
+              's, checking buffer...'
+          );
           let jumpedHole = false;
           if (video.buffered && video.buffered.length > 0) {
             for (let i = 0; i < video.buffered.length; i++) {
@@ -119,16 +146,36 @@ export function initStallWatchdog() {
               }
             }
           }
-          if (!jumpedHole) {
-            video.currentTime = cur + 0.1;
-            const p = video.play();
-            if (p && p.catch) p.catch(() => {});
+          if (!jumpedHole && video.buffered && video.buffered.length > 0) {
+            const end = video.buffered.end(video.buffered.length - 1);
+            if (end > cur + 0.5) {
+              video.currentTime = Math.min(end - 0.2, cur + 0.1);
+              const p = video.play();
+              if (p && p.catch) p.catch(() => {});
+            }
           }
+        }
+
+        // After 8 seconds of unrecoverable freeze (e.g. 1440p decoder failure):
+        // Automatically switch back to stable quality to unblock TV and remote controls!
+        if (stallDuration >= 8) {
           stallDuration = 0;
+          recoveryAttempts++;
+          if (recoveryAttempts <= 2) {
+            console.warn(
+              '[TAF] Critical stall: auto-switching to stable quality (1080p / Auto)...'
+            );
+            if (typeof window.taf_resetToStableQuality === 'function') {
+              window.taf_resetToStableQuality();
+            } else if (typeof window.taf_reloadStream === 'function') {
+              window.taf_reloadStream();
+            }
+          }
         }
       } else {
         lastTime = cur;
         stallDuration = 0;
+        recoveryAttempts = 0;
       }
     } catch {
       /* ignore */
@@ -227,33 +274,21 @@ export function patchMediaCodecs() {
           return origAddSourceBuffer.call(this, targetType);
         } catch (err1) {
           if (typeof targetType === 'string' && isHevcCodec(targetType)) {
-            // Try swapping hev1 <-> hvc1
-            const swapped = targetType.includes('hev1')
-              ? targetType.replace(/hev1/g, 'hvc1')
-              : targetType.replace(/hvc1/g, 'hev1');
+            const cleaned = cleanHevcCodec(targetType);
+            if (cleaned !== targetType) {
+              try {
+                return origAddSourceBuffer.call(this, cleaned);
+              } catch {
+                /* ignore */
+              }
+            }
+            const swapped = cleaned.includes('hev1')
+              ? cleaned.replace(/hev1/g, 'hvc1')
+              : cleaned.replace(/hvc1/g, 'hev1');
             try {
               return origAddSourceBuffer.call(this, swapped);
             } catch {
               /* ignore */
-            }
-
-            // Try standard profiles
-            const fallbacks = [
-              targetType.includes('mp4a')
-                ? 'video/mp4; codecs="hvc1.1.6.L93.B0,mp4a.40.2"'
-                : 'video/mp4; codecs="hvc1.1.6.L93.B0"',
-              targetType.includes('mp4a')
-                ? 'video/mp4; codecs="hvc1,mp4a.40.2"'
-                : 'video/mp4; codecs="hvc1"',
-              'video/mp4; codecs="hev1"',
-              'video/mp4; codecs="hevc"'
-            ];
-            for (const fb of fallbacks) {
-              try {
-                return origAddSourceBuffer.call(this, fb);
-              } catch {
-                /* ignore */
-              }
             }
           }
           throw err1;
@@ -292,30 +327,21 @@ export function patchMediaCodecs() {
           return origManagedAddSourceBuffer.call(this, targetType);
         } catch (err1) {
           if (typeof targetType === 'string' && isHevcCodec(targetType)) {
-            const swapped = targetType.includes('hev1')
-              ? targetType.replace(/hev1/g, 'hvc1')
-              : targetType.replace(/hvc1/g, 'hev1');
+            const cleaned = cleanHevcCodec(targetType);
+            if (cleaned !== targetType) {
+              try {
+                return origManagedAddSourceBuffer.call(this, cleaned);
+              } catch {
+                /* ignore */
+              }
+            }
+            const swapped = cleaned.includes('hev1')
+              ? cleaned.replace(/hev1/g, 'hvc1')
+              : cleaned.replace(/hvc1/g, 'hev1');
             try {
               return origManagedAddSourceBuffer.call(this, swapped);
             } catch {
               /* ignore */
-            }
-            const fallbacks = [
-              targetType.includes('mp4a')
-                ? 'video/mp4; codecs="hvc1.1.6.L93.B0,mp4a.40.2"'
-                : 'video/mp4; codecs="hvc1.1.6.L93.B0"',
-              targetType.includes('mp4a')
-                ? 'video/mp4; codecs="hvc1,mp4a.40.2"'
-                : 'video/mp4; codecs="hvc1"',
-              'video/mp4; codecs="hev1"',
-              'video/mp4; codecs="hevc"'
-            ];
-            for (const fb of fallbacks) {
-              try {
-                return origManagedAddSourceBuffer.call(this, fb);
-              } catch {
-                /* ignore */
-              }
             }
           }
           throw err1;
@@ -340,37 +366,7 @@ export function patchMediaCodecs() {
     console.warn('[TAF] Failed to patch ManagedMediaSource.prototype.addSourceBuffer', err);
   }
 
-  // 3. Hook SourceBuffer.prototype.appendBuffer to evict old back-buffer and prevent TV OOM
-  try {
-    if (
-      typeof window.SourceBuffer !== 'undefined' &&
-      window.SourceBuffer.prototype &&
-      typeof window.SourceBuffer.prototype.appendBuffer === 'function'
-    ) {
-      const origAppend = window.SourceBuffer.prototype.appendBuffer;
-      window.SourceBuffer.prototype.appendBuffer = function (data) {
-        try {
-          if (!this.updating && this.buffered && this.buffered.length > 0) {
-            const video = document.querySelector('video');
-            if (video && video.currentTime > 0) {
-              const start = this.buffered.start(0);
-              // If back-buffer is larger than 15s, remove older data to prevent TV OOM
-              if (video.currentTime - start > 15) {
-                this.remove(start, video.currentTime - 8);
-              }
-            }
-          }
-        } catch {
-          /* ignore */
-        }
-        return origAppend.call(this, data);
-      };
-    }
-  } catch (err) {
-    console.warn('[TAF] Failed to patch SourceBuffer.prototype.appendBuffer', err);
-  }
-
-  // 4. Override HTMLMediaElement.prototype.canPlayType
+  // 3. Override HTMLMediaElement.prototype.canPlayType
   try {
     if (
       typeof window.HTMLMediaElement !== 'undefined' &&
@@ -388,18 +384,17 @@ export function patchMediaCodecs() {
             if (res) {
               return res;
             }
-            if (typeof type === 'string' && type.includes('hev1')) {
-              const hvcRes = origCanPlayType.call(
-                this,
-                type.replace(/hev1/g, 'hvc1')
-              );
-              if (hvcRes) {
-                return hvcRes;
+            if (typeof type === 'string') {
+              const cleaned = cleanHevcCodec(type);
+              if (cleaned !== type) {
+                const cleanRes = origCanPlayType.call(this, cleaned);
+                if (cleanRes) return cleanRes;
               }
-            }
-            const baseRes = origCanPlayType.call(this, 'video/mp4; codecs="hvc1"');
-            if (baseRes) {
-              return baseRes;
+              const swapped = cleaned.includes('hev1')
+                ? cleaned.replace(/hev1/g, 'hvc1')
+                : cleaned.replace(/hvc1/g, 'hev1');
+              const swappedRes = origCanPlayType.call(this, swapped);
+              if (swappedRes) return swappedRes;
             }
           } catch {
             /* ignore */
@@ -425,7 +420,7 @@ export function patchMediaCodecs() {
     );
   }
 
-  // 5. Initialize the playback stall watchdog
+  // 4. Initialize the playback stall watchdog
   initStallWatchdog();
 }
 

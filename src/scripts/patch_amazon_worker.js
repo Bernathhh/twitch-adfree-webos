@@ -17,6 +17,16 @@ function isHevcCodec(type) {
   return lower.includes('hev1') || lower.includes('hvc1');
 }
 
+function cleanHevcCodec(type) {
+  if (typeof type !== 'string') {
+    return type;
+  }
+  return type.replace(
+    /(hev1|hvc1)\.([1-9]\d*)\.([\da-fA-F]+)\.([LH]\d+)\.([\da-fA-F]+)(?:\.[\da-fA-F]+)+/g,
+    '$1.$2.$3.$4.$5'
+  );
+}
+
 // Disable AV1 on MediaSource and ensure HEVC is supported if worker supports it
 if (
   typeof self !== 'undefined' &&
@@ -34,19 +44,14 @@ if (
           return true;
         }
         if (typeof type === 'string') {
-          const swapped = type.includes('hev1')
-            ? type.replace(/hev1/g, 'hvc1')
-            : type.replace(/hvc1/g, 'hev1');
+          const cleaned = cleanHevcCodec(type);
+          if (cleaned !== type && origIsTypeSupported.call(self.MediaSource, cleaned)) {
+            return true;
+          }
+          const swapped = cleaned.includes('hev1')
+            ? cleaned.replace(/hev1/g, 'hvc1')
+            : cleaned.replace(/hvc1/g, 'hev1');
           if (origIsTypeSupported.call(self.MediaSource, swapped)) {
-            return true;
-          }
-          const baseType = type.includes('mp4a')
-            ? 'video/mp4; codecs="hvc1.1.6.L93.B0,mp4a.40.2"'
-            : 'video/mp4; codecs="hvc1.1.6.L93.B0"';
-          if (origIsTypeSupported.call(self.MediaSource, baseType)) {
-            return true;
-          }
-          if (origIsTypeSupported.call(self.MediaSource, 'video/mp4; codecs="hvc1"')) {
             return true;
           }
         }
@@ -73,31 +78,21 @@ if (
       return origAddSourceBuffer.call(this, targetType);
     } catch (err) {
       if (typeof targetType === 'string' && isHevcCodec(targetType)) {
-        const swapped = targetType.includes('hev1')
-          ? targetType.replace(/hev1/g, 'hvc1')
-          : targetType.replace(/hvc1/g, 'hev1');
+        const cleaned = cleanHevcCodec(targetType);
+        if (cleaned !== targetType) {
+          try {
+            return origAddSourceBuffer.call(this, cleaned);
+          } catch {
+            /* ignore */
+          }
+        }
+        const swapped = cleaned.includes('hev1')
+          ? cleaned.replace(/hev1/g, 'hvc1')
+          : cleaned.replace(/hvc1/g, 'hev1');
         try {
           return origAddSourceBuffer.call(this, swapped);
         } catch {
           /* ignore */
-        }
-
-        const fallbacks = [
-          targetType.includes('mp4a')
-            ? 'video/mp4; codecs="hvc1.1.6.L93.B0,mp4a.40.2"'
-            : 'video/mp4; codecs="hvc1.1.6.L93.B0"',
-          targetType.includes('mp4a')
-            ? 'video/mp4; codecs="hvc1,mp4a.40.2"'
-            : 'video/mp4; codecs="hvc1"',
-          'video/mp4; codecs="hev1"',
-          'video/mp4; codecs="hevc"'
-        ];
-        for (const fb of fallbacks) {
-          try {
-            return origAddSourceBuffer.call(this, fb);
-          } catch {
-            /* ignore */
-          }
         }
       }
       throw err;
@@ -271,10 +266,13 @@ function patchManifest(manifest) {
     return manifest;
   }
 
-  // 1. Normalize hev1 -> hvc1 for webOS Chromium MSE compatibility
-  let cleaned = manifest.replace(/hev1/g, 'hvc1');
+  // 1. Clean non-standard HEVC codec strings (trim extra .0.0.0.0.0 tokens)
+  let cleaned = cleanHevcCodec(manifest);
 
-  // 2. Strip any AV1 variants (av01 / av1) to avoid software decoding / freezing
+  // 2. Normalize hev1 -> hvc1 for webOS Chromium MSE compatibility
+  cleaned = cleaned.replace(/hev1/g, 'hvc1');
+
+  // 3. Strip any AV1 variants (av01 / av1) to avoid software decoding / freezing
   if (cleaned.includes('av01') || cleaned.includes('av1')) {
     const lines = cleaned.split(/\r?\n/);
     const filteredLines = [];

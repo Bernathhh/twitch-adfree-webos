@@ -47,7 +47,9 @@ function initializeLowLatency() {
       // Wait until buffer is ready before jumping to live edge
       function waitForBuffer() {
         if (curVideo.buffered.length > 0) {
-          curVideo.currentTime = curVideo.buffered.end(0);
+          const bEnd = curVideo.buffered.end(0);
+          const bStart = curVideo.buffered.start(0);
+          curVideo.currentTime = Math.max(bStart, bEnd - 1.5);
 
           // Reset stats
           function checkMinDiff() {

@@ -288,6 +288,11 @@ export function resetToStableQuality() {
   return false;
 }
 
+if (typeof window !== 'undefined') {
+  window.taf_resetToStableQuality = resetToStableQuality;
+  window.taf_reloadStream = reloadTwitchStream;
+}
+
 function createConfigCheckbox(key) {
   const elmInput = document.createElement('input');
   const isBoolean = typeof configOptions[key].default === 'boolean';

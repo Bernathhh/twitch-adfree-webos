@@ -17,6 +17,7 @@ import {
   PROXY_SERVER_KEYS,
   USE_CUSTOM_PROXY
 } from '../constants/config.constants.js';
+import { cleanHevcCodec } from './media_codecs.js';
 
 const resolutions = {
   '160p30': {
@@ -339,10 +340,13 @@ export function patchManifest(manifest) {
     return manifest;
   }
 
-  // 1. Normalize hev1 -> hvc1 for webOS Chromium MSE compatibility
-  let cleaned = manifest.replace(/hev1/g, 'hvc1');
+  // 1. Clean non-standard HEVC codec strings (trim extra .0.0.0.0.0 tokens)
+  let cleaned = cleanHevcCodec(manifest);
 
-  // 2. Strip any AV1 variants (av01 / av1) to avoid software decoding / freezing
+  // 2. Normalize hev1 -> hvc1 for webOS Chromium MSE compatibility
+  cleaned = cleaned.replace(/hev1/g, 'hvc1');
+
+  // 3. Strip any AV1 variants (av01 / av1) to avoid software decoding / freezing
   if (cleaned.includes('av01') || cleaned.includes('av1')) {
     const lines = cleaned.split(/\r?\n/);
     const filteredLines = [];
@@ -576,8 +580,15 @@ export function installUsherXhrPatch() {
         return;
       }
 
-      // Patch playlist from unmuted to muted segments
-      if (url.includes('cloudfront') && url.includes('.m3u8')) {
+      // Patch VOD playlist from unmuted to muted segments if applicable
+      const isVodMutedPlaylist =
+        url.includes('cloudfront') &&
+        url.includes('.m3u8') &&
+        (url.includes('/vod/') ||
+          url.includes('index-dvr') ||
+          url.includes('highlight'));
+
+      if (isVodMutedPlaylist) {
         fetch(url)
           .then((response) => response.text())
           .then((playlistBody) => {
@@ -590,7 +601,7 @@ export function installUsherXhrPatch() {
           })
           .catch((err) => {
             console.warn('[TAF] Failed to patch muted playlist', err);
-            super.send(body);
+            abortSilently(this);
           });
 
         return;
