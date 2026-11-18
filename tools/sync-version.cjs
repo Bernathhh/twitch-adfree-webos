@@ -16,3 +16,8 @@ fs.writeFileSync(
     2
   )}\n`
 );
+
+fs.writeFileSync(
+  'src/constants/global.constants.js',
+  `export const APP_VERSION = '${packageInfo.version}';\n`
+);

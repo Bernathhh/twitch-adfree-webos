@@ -1,6 +1,6 @@
 {
   "name": "twitch-adfree",
-  "version": "1.6.6",
+  "version": "1.6.7",
   "description": "Ad-free Twitch app for webOS",
   "type": "module",
   "main": "index.js",
@@ -13,7 +13,7 @@
     "inspect": "ares-inspect twitch.adamffdev.v1",
     "launch": "ares-launch twitch.adamffdev.v1",
     "manifest": "node tools/gen-manifest.cjs twitch.adamffdev.v1.manifest.json",
-    "version": "node tools/sync-version.cjs && git add assets/appinfo.json",
+    "version": "node tools/sync-version.cjs && git add assets/appinfo.json src/constants/global.constants.js",
     "prepare": "husky",
     "lint": "eslint",
     "type-check": "tsc -b",
