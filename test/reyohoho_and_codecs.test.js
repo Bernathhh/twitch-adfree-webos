@@ -15,7 +15,10 @@ import {
   isHevcCodec,
   cleanHevcCodec,
   checkHevcSupported,
-  patchMediaCodecs
+  patchMediaCodecs,
+  TV_HLS_CONFIG_OVERRIDES,
+  applyTvHlsConfig,
+  patchHlsConstructor
 } from '../src/scripts/media_codecs.js';
 import {
   isInputFocused,
@@ -177,8 +180,8 @@ test('checkHevcSupported normalizes syntax and tests swapped FourCCs without spo
     false
   );
 
-  // When webOS Chromium only supports up to L123 in MSE:
-  const webosOrigFn = (type) => type === 'video/mp4; codecs="hvc1.1.6.L123.90"';
+  // When webOS Chromium only supports universal baseline L93.B0 in MSE:
+  const webosOrigFn = (type) => type === 'video/mp4; codecs="hvc1.1.6.L93.B0"';
   assert.equal(
     checkHevcSupported(
       webosOrigFn,
@@ -189,7 +192,7 @@ test('checkHevcSupported normalizes syntax and tests swapped FourCCs without spo
   );
 });
 
-test('patchManifest removes AV1 variants and cleans/normalizes hev1 to hvc1', () => {
+test('patchManifest removes AV1 variants and normalizes HEVC to L93.B0 and high AVC to L4.2', () => {
   const inputManifest = `#EXTM3U
 #EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="1440p60_av1",NAME="1440p60",AUTOSELECT=YES,DEFAULT=YES
 #EXT-X-STREAM-INF:BANDWIDTH=8745502,RESOLUTION=2560x1440,CODECS="av01.0.13M.08,mp4a.40.2",VIDEO="1440p60_av1",FRAME-RATE=60.000
@@ -197,6 +200,9 @@ https://euc12.playlist.ttvnw.net/v1/playlist/av1.m3u8
 #EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="1440p60_hevc",NAME="1440p60",AUTOSELECT=YES,DEFAULT=YES
 #EXT-X-STREAM-INF:BANDWIDTH=8745502,RESOLUTION=2560x1440,CODECS="hev1.1.6.L150.90.0.0.0.0.0,mp4a.40.2",VIDEO="1440p60_hevc",FRAME-RATE=60.000
 https://euc12.playlist.ttvnw.net/v1/playlist/hevc.m3u8
+#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="1440p60_avc",NAME="1440p60",AUTOSELECT=YES,DEFAULT=YES
+#EXT-X-STREAM-INF:BANDWIDTH=9000000,RESOLUTION=2560x1440,CODECS="avc1.640033,mp4a.40.2",VIDEO="1440p60_avc",FRAME-RATE=60.000
+https://euc12.playlist.ttvnw.net/v1/playlist/avc1440p.m3u8
 #EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="1080p60",NAME="1080p60",AUTOSELECT=YES,DEFAULT=YES
 #EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080,CODECS="avc1.64002A,mp4a.40.2",VIDEO="1080p60",FRAME-RATE=60.000
 https://euc12.playlist.ttvnw.net/v1/playlist/1080p.m3u8`;
@@ -208,13 +214,17 @@ https://euc12.playlist.ttvnw.net/v1/playlist/1080p.m3u8`;
   assert.equal(patched.includes('1440p60_av1'), false);
   assert.equal(patched.includes('av1.m3u8'), false);
 
-  // HEVC must be cleaned and normalized to hvc1 with level normalized to L123 for webOS
+  // HEVC must be normalized to universal baseline hvc1.1.6.L93.B0 for webOS MSE compatibility
   assert.equal(patched.includes('hev1'), false);
-  assert.match(patched, /CODECS="hvc1\.1\.6\.L123\.90,mp4a\.40\.2"/);
+  assert.match(patched, /CODECS="hvc1\.1\.6\.L93\.B0,mp4a\.40\.2"/);
   assert.equal(patched.includes('1440p60_hevc'), true);
   assert.equal(patched.includes('hevc.m3u8'), true);
 
-  // AVC1 1080p must remain intact
+  // AVC Level 5.1 (avc1.640033) must be normalized to Level 4.2 (avc1.64002a)
+  assert.match(patched, /CODECS="avc1\.64002a,mp4a\.40\.2"/);
+  assert.equal(patched.includes('avc1440p.m3u8'), true);
+
+  // AVC1 1080p Level 4.2 must remain intact
   assert.match(patched, /CODECS="avc1\.64002A,mp4a\.40\.2"/);
   assert.equal(patched.includes('1080p.m3u8'), true);
 });
@@ -233,7 +243,12 @@ test('patchMediaCodecs overrides MediaSource.isTypeSupported, addSourceBuffer an
   }
 
   FakeMediaSource.prototype.addSourceBuffer = function (type) {
-    if (type.includes('hev1') || type.includes('L15') || type.includes('H15')) {
+    if (
+      type.includes('hev1') ||
+      type.includes('L15') ||
+      type.includes('H15') ||
+      type.includes('640033')
+    ) {
       throw new Error('NotSupportedError: hev1/Level 5+ is unsupported');
     }
     return { type };
@@ -292,7 +307,7 @@ test('patchMediaCodecs overrides MediaSource.isTypeSupported, addSourceBuffer an
     true
   );
 
-  // addSourceBuffer normalizes hev1 -> hvc1 and Level 5.0+ to L123 so it succeeds without throwing
+  // addSourceBuffer normalizes hev1 -> hvc1 and HEVC fallbacks to universal baseline L93.B0
   const msInstance = new FakeMediaSource();
   const sb = msInstance.addSourceBuffer('video/mp4; codecs="hev1.1.6.L93.B0"');
   assert.equal(sb.type, 'video/mp4; codecs="hvc1.1.6.L93.B0"');
@@ -300,12 +315,17 @@ test('patchMediaCodecs overrides MediaSource.isTypeSupported, addSourceBuffer an
   const sb1440p = msInstance.addSourceBuffer(
     'video/mp4; codecs="hev1.1.6.L150.90"'
   );
-  assert.equal(sb1440p.type, 'video/mp4; codecs="hvc1.1.6.L123.90"');
+  assert.equal(sb1440p.type, 'video/mp4; codecs="hvc1.1.6.L93.B0"');
 
   const sb4k = msInstance.addSourceBuffer(
     'video/mp4; codecs="hev1.1.6.H153.B0"'
   );
-  assert.equal(sb4k.type, 'video/mp4; codecs="hvc1.1.6.L123.B0"');
+  assert.equal(sb4k.type, 'video/mp4; codecs="hvc1.1.6.L93.B0"');
+
+  const sbAvc = msInstance.addSourceBuffer(
+    'video/mp4; codecs="avc1.640033,mp4a.40.2"'
+  );
+  assert.equal(sbAvc.type, 'video/mp4; codecs="avc1.64002a,mp4a.40.2"');
 
   assert.equal(
     mediaEl.canPlayType('video/mp4; codecs="hev1.1.6.L93.B0"'),
@@ -435,7 +455,7 @@ test('direct usher fetch is used when USE_CUSTOM_PROXY is false (default)', asyn
   );
 
   const text = await res.text();
-  assert.match(text, /CODECS="hvc1\.1\.6\.L123\.90"/);
+  assert.match(text, /CODECS="hvc1\.1\.6\.L93\.B0"/);
 
   globalThis.window = originalWindow;
   globalThis.fetch = originalFetch;
@@ -556,4 +576,39 @@ test('LOAD_EMOTES and ENABLE_CHAT_OVERLAY default to false, USE_CUSTOM_PROXY def
   assert.equal(configOptions[ENABLE_CHAT_OVERLAY].default, false);
   assert.equal(configOptions[USE_CUSTOM_PROXY].default, true);
 });
+
+test('applyTvHlsConfig and patchHlsConstructor enforce Smart TV buffer and memory limits', () => {
+  class MockHls {
+    static isSupported() {
+      return true;
+    }
+    constructor(cfg) {
+      this.config = Object.assign({}, MockHls.DefaultConfig, cfg);
+    }
+  }
+  MockHls.DefaultConfig = {
+    maxBufferLength: 30,
+    backBufferLength: Infinity,
+    maxBufferSize: 60000000
+  };
+
+  const Patched = applyTvHlsConfig(MockHls);
+  assert.equal(TV_HLS_CONFIG_OVERRIDES.maxBufferLength, 10);
+  assert.equal(typeof patchHlsConstructor, 'function');
+  assert.equal(MockHls.DefaultConfig.maxBufferLength, 10);
+  assert.equal(MockHls.DefaultConfig.maxBufferSize, 15 * 1024 * 1024);
+  assert.equal(MockHls.DefaultConfig.backBufferLength, 5);
+  assert.equal(MockHls.DefaultConfig.liveBackBufferLength, 5);
+  assert.equal(MockHls.DefaultConfig.lowLatencyMode, false);
+  assert.equal(Patched.isSupported(), true);
+
+  const instance = new Patched({ maxBufferLength: 60, maxBufferSize: 100000000 });
+  // Overrides passed userConfig with TV limits to prevent memory exhaustion
+  assert.equal(instance.config.maxBufferLength, 10);
+  assert.equal(instance.config.maxBufferSize, 15 * 1024 * 1024);
+  assert.equal(instance.config.backBufferLength, 5);
+  assert.equal(instance.config.liveBackBufferLength, 5);
+  assert.equal(instance.config.lowLatencyMode, false);
+});
+
 

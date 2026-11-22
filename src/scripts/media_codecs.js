@@ -4,12 +4,33 @@
  * 1. Report AV1 (av01 / av1) as unsupported so webOS avoids software AV1 decoding,
  *    which exhausts TV memory and freezes 1440p/4K streams.
  * 2. Handle hardware-accelerated HEVC / H.265 (hvc1 / hev1) by testing real browser
- *    support across FourCC variants (hev1 <-> hvc1) and standardizing RFC 6381 syntax.
- * 3. Never spoof unsupported profile levels (e.g. L93 fallback for L150) so the TV
- *    hardware is not forced into resolutions it cannot decode.
- * 4. Run an automatic stall detection watchdog that safely recovers playback or
- *    automatically drops back to stable 1080p / Auto if a high-res stream locks up.
+ *    support across FourCC variants (hev1 <-> hvc1) and baseline universal L93.B0.
+ * 3. Normalize high-level AVC (H.264 Level 5.0+ e.g. avc1.640033) to Level 4.2
+ *    (avc1.64002a) so webOS MSE does not reject the source buffer.
+ * 4. Intercept window.Hls / Hls.DefaultConfig to enforce Smart TV memory-safe
+ *    buffer limits (maxBufferLength: 10s, maxBufferSize: 15MB, backBufferLength: 5s,
+ *    liveBackBufferLength: 5s), preventing webOS OOM freezes and unresponsive remote keys.
+ * 5. Run an automatic stall detection watchdog that safely recovers playback or
+ *    automatically drops back to stable 1080p / Auto if a stream locks up.
  */
+
+/**
+ * Smart TV optimized HLS buffer configuration.
+ * Constrains forward buffer to 10-15s / 15MB and purges past played buffer after 5s.
+ * This prevents webOS WebEngine memory starvation and UI lockups on 1440p60.
+ */
+export const TV_HLS_CONFIG_OVERRIDES = {
+  maxBufferLength: 10,
+  maxMaxBufferLength: 15,
+  maxBufferSize: 15 * 1024 * 1024,
+  backBufferLength: 5,
+  liveBackBufferLength: 5,
+  frontBufferFlushThreshold: 20,
+  highBufferWatchdogPeriod: 2,
+  nudgeOffset: 0.1,
+  nudgeMaxRetry: 5,
+  lowLatencyMode: false
+};
 
 /**
  * Checks whether a codec / mime-type string specifies AV1.
@@ -62,9 +83,7 @@ export function cleanHevcCodec(type) {
 
 /**
  * Checks whether HEVC is supported by trying original isTypeSupported with
- * RFC 6381 normalization and hev1 <-> hvc1 FourCC swapping.
- * Never falls back to a lower level (such as L93) when a higher level is queried,
- * ensuring the TV hardware decoder is not forced into unsupported resolutions.
+ * RFC 6381 normalization, hev1 <-> hvc1 FourCC swapping, and baseline L93.B0 check.
  *
  * @param {Function} origFn
  * @param {unknown} context
@@ -88,13 +107,15 @@ export function checkHevcSupported(origFn, context, type) {
       if (origFn.call(context, swapped)) {
         return true;
       }
-      // If webOS MSE rejects Level 5.0+ (L150/L153) due to Chromium level table,
-      // check with normalized Level 4.1 (L123) or generic hvc1:
-      const normalized = swapped.replace(
-        /(hvc1\.[1-9]\d*\.[\da-fA-F]+\.)[LH](?:15\d|16\d|17\d|18\d)(\.[\da-fA-F]+)?/g,
-        '$1L123$2'
+      // Baseline universal L93.B0 supported across all webOS MSE implementations:
+      const l93 = swapped.replace(
+        /(hvc1|hev1)(?:\.[^",]+)?/g,
+        'hvc1.1.6.L93.B0'
       );
-      if (normalized !== swapped && origFn.call(context, normalized)) {
+      if (origFn.call(context, l93)) {
+        return true;
+      }
+      if (origFn.call(context, 'video/mp4; codecs="hvc1.1.6.L93.B0"')) {
         return true;
       }
       if (origFn.call(context, 'video/mp4; codecs="hvc1"')) {
@@ -111,11 +132,95 @@ export function checkHevcSupported(origFn, context, type) {
 }
 
 /**
- * No-op retained for backwards compatibility.
- * External buffer eviction via sb.remove() interferes with hls.js internal queue
- * causing InvalidStateError and video freezes on webOS.
+ * Applies TV-safe memory constraints to an Hls constructor and its DefaultConfig.
+ * Wraps constructor so any userConfig passed by Twitch player also receives limits.
  *
- * @param {unknown} sb
+ * @param {any} HlsCtor
+ * @returns {any}
+ */
+export function applyTvHlsConfig(HlsCtor) {
+  if (!HlsCtor || typeof HlsCtor !== 'function') return HlsCtor;
+
+  try {
+    if (HlsCtor.DefaultConfig && typeof HlsCtor.DefaultConfig === 'object') {
+      Object.assign(HlsCtor.DefaultConfig, TV_HLS_CONFIG_OVERRIDES);
+    }
+  } catch {
+    /* ignore */
+  }
+
+  if (HlsCtor._tafPatched) {
+    return HlsCtor;
+  }
+
+  const origHls = HlsCtor;
+  const PatchedHls = function (userConfig) {
+    const mergedConfig = Object.assign({}, userConfig, TV_HLS_CONFIG_OVERRIDES);
+    return new origHls(mergedConfig);
+  };
+
+  Object.setPrototypeOf(PatchedHls, origHls);
+  PatchedHls.prototype = origHls.prototype;
+  PatchedHls._tafPatched = true;
+
+  try {
+    Object.defineProperty(PatchedHls, 'DefaultConfig', {
+      get() {
+        return origHls.DefaultConfig;
+      },
+      set(val) {
+        if (val && typeof val === 'object') {
+          Object.assign(val, TV_HLS_CONFIG_OVERRIDES);
+        }
+        origHls.DefaultConfig = val;
+      },
+      configurable: true
+    });
+  } catch {
+    /* ignore */
+  }
+
+  return PatchedHls;
+}
+
+/**
+ * Intercepts window.Hls so whenever the player bundle defines or uses Hls,
+ * the Smart TV buffer limits are active.
+ */
+export function patchHlsConstructor() {
+  if (typeof window === 'undefined') return;
+
+  let currentHls = window.Hls;
+  if (currentHls) {
+    currentHls = applyTvHlsConfig(currentHls);
+    try {
+      window.Hls = currentHls;
+    } catch {
+      /* ignore */
+    }
+  }
+
+  try {
+    Object.defineProperty(window, 'Hls', {
+      get() {
+        return currentHls;
+      },
+      set(newHls) {
+        currentHls = applyTvHlsConfig(newHls);
+      },
+      configurable: true,
+      enumerable: true
+    });
+  } catch (err) {
+    console.warn('[TAF] Could not defineProperty on window.Hls', err);
+  }
+}
+
+/**
+ * No-op retained for backwards compatibility.
+ * Buffer eviction is managed natively by hls.js via backBufferLength.
+ *
+ * @param {unknown} _sb
  */
 export function attachBufferEviction(_sb) {
   // Deliberately no-op: hls.js manages its own buffer lifecycle
@@ -194,6 +299,9 @@ export function patchMediaCodecs() {
     return;
   }
 
+  // Intercept window.Hls to enforce Smart TV safe buffer constraints
+  patchHlsConstructor();
+
   // 1. Override MediaSource.isTypeSupported
   try {
     if (
@@ -207,6 +315,18 @@ export function patchMediaCodecs() {
         }
         if (isHevcCodec(type)) {
           return checkHevcSupported(origIsTypeSupported, window.MediaSource, type);
+        }
+        if (typeof type === 'string' && type.includes('avc1')) {
+          if (origIsTypeSupported.call(window.MediaSource, type)) {
+            return true;
+          }
+          const normAvc = type.replace(
+            /(avc1\.[0-9a-fA-F]{4})3[0-9a-fA-F]/g,
+            '$12a'
+          );
+          if (normAvc !== type && origIsTypeSupported.call(window.MediaSource, normAvc)) {
+            return true;
+          }
         }
         return origIsTypeSupported.call(window.MediaSource, type);
       };
@@ -243,6 +363,21 @@ export function patchMediaCodecs() {
             type
           );
         }
+        if (typeof type === 'string' && type.includes('avc1')) {
+          if (origManagedIsTypeSupported.call(window.ManagedMediaSource, type)) {
+            return true;
+          }
+          const normAvc = type.replace(
+            /(avc1\.[0-9a-fA-F]{4})3[0-9a-fA-F]/g,
+            '$12a'
+          );
+          if (
+            normAvc !== type &&
+            origManagedIsTypeSupported.call(window.ManagedMediaSource, normAvc)
+          ) {
+            return true;
+          }
+        }
         return origManagedIsTypeSupported.call(
           window.ManagedMediaSource,
           type
@@ -275,53 +410,80 @@ export function patchMediaCodecs() {
         try {
           return origAddSourceBuffer.call(this, targetType);
         } catch (err1) {
-          if (typeof targetType === 'string' && isHevcCodec(targetType)) {
-            const cleaned = cleanHevcCodec(targetType);
-            if (cleaned !== targetType) {
+          if (typeof targetType === 'string') {
+            if (isHevcCodec(targetType)) {
+              const hasAudio = targetType.includes('mp4a');
+              const cleaned = cleanHevcCodec(targetType);
+              if (cleaned !== targetType) {
+                try {
+                  return origAddSourceBuffer.call(this, cleaned);
+                } catch {
+                  /* ignore */
+                }
+              }
+              const swapped = cleaned.includes('hev1')
+                ? cleaned.replace(/hev1/g, 'hvc1')
+                : cleaned.replace(/hvc1/g, 'hev1');
               try {
-                return origAddSourceBuffer.call(this, cleaned);
+                return origAddSourceBuffer.call(this, swapped);
               } catch {
                 /* ignore */
               }
-            }
-            const swapped = cleaned.includes('hev1')
-              ? cleaned.replace(/hev1/g, 'hvc1')
-              : cleaned.replace(/hvc1/g, 'hev1');
-            try {
-              return origAddSourceBuffer.call(this, swapped);
-            } catch {
-              /* ignore */
-            }
 
-            const normalized = swapped.replace(
-              /(hvc1\.[1-9]\d*\.[\da-fA-F]+\.)[LH](?:15\d|16\d|17\d|18\d)(\.[\da-fA-F]+)?/g,
-              '$1L123$2'
-            );
-            if (normalized !== swapped) {
+              const l93 = swapped.replace(
+                /(hvc1|hev1)(?:\.[^",]+)?/g,
+                'hvc1.1.6.L93.B0'
+              );
               try {
-                return origAddSourceBuffer.call(this, normalized);
+                return origAddSourceBuffer.call(this, l93);
               } catch {
                 /* ignore */
               }
+
+              const fallbacks = [
+                hasAudio
+                  ? 'video/mp4; codecs="hvc1.1.6.L93.B0,mp4a.40.2"'
+                  : 'video/mp4; codecs="hvc1.1.6.L93.B0"',
+                hasAudio
+                  ? 'video/mp4; codecs="hvc1,mp4a.40.2"'
+                  : 'video/mp4; codecs="hvc1"',
+                hasAudio
+                  ? 'video/mp4; codecs="hev1,mp4a.40.2"'
+                  : 'video/mp4; codecs="hev1"',
+                'video/mp4; codecs="hevc"'
+              ];
+              for (const fb of fallbacks) {
+                try {
+                  return origAddSourceBuffer.call(this, fb);
+                } catch {
+                  /* ignore */
+                }
+              }
             }
 
-            const fallbacks = [
-              targetType.includes('mp4a')
-                ? 'video/mp4; codecs="hvc1,mp4a.40.2"'
-                : 'video/mp4; codecs="hvc1"',
-              targetType.includes('mp4a')
-                ? 'video/mp4; codecs="hvc1.1.6.L120.90,mp4a.40.2"'
-                : 'video/mp4; codecs="hvc1.1.6.L120.90"',
-              targetType.includes('mp4a')
-                ? 'video/mp4; codecs="hev1,mp4a.40.2"'
-                : 'video/mp4; codecs="hev1"',
-              'video/mp4; codecs="hevc"'
-            ];
-            for (const fb of fallbacks) {
-              try {
-                return origAddSourceBuffer.call(this, fb);
-              } catch {
-                /* ignore */
+            if (targetType.includes('avc1')) {
+              const normAvc = targetType.replace(
+                /(avc1\.[0-9a-fA-F]{4})3[0-9a-fA-F]/g,
+                '$12a'
+              );
+              if (normAvc !== targetType) {
+                try {
+                  return origAddSourceBuffer.call(this, normAvc);
+                } catch {
+                  /* ignore */
+                }
+              }
+              const avcFallbacks = [
+                'video/mp4; codecs="avc1.64002a,mp4a.40.2"',
+                'video/mp4; codecs="avc1.4d002a,mp4a.40.2"',
+                'video/mp4; codecs="avc1.42e01e,mp4a.40.2"'
+              ];
+              for (const fb of avcFallbacks) {
+                try {
+                  return origAddSourceBuffer.call(this, fb);
+                } catch {
+                  /* ignore */
+                }
               }
             }
           }
@@ -360,53 +522,80 @@ export function patchMediaCodecs() {
         try {
           return origManagedAddSourceBuffer.call(this, targetType);
         } catch (err1) {
-          if (typeof targetType === 'string' && isHevcCodec(targetType)) {
-            const cleaned = cleanHevcCodec(targetType);
-            if (cleaned !== targetType) {
+          if (typeof targetType === 'string') {
+            if (isHevcCodec(targetType)) {
+              const hasAudio = targetType.includes('mp4a');
+              const cleaned = cleanHevcCodec(targetType);
+              if (cleaned !== targetType) {
+                try {
+                  return origManagedAddSourceBuffer.call(this, cleaned);
+                } catch {
+                  /* ignore */
+                }
+              }
+              const swapped = cleaned.includes('hev1')
+                ? cleaned.replace(/hev1/g, 'hvc1')
+                : cleaned.replace(/hvc1/g, 'hev1');
               try {
-                return origManagedAddSourceBuffer.call(this, cleaned);
+                return origManagedAddSourceBuffer.call(this, swapped);
               } catch {
                 /* ignore */
               }
-            }
-            const swapped = cleaned.includes('hev1')
-              ? cleaned.replace(/hev1/g, 'hvc1')
-              : cleaned.replace(/hvc1/g, 'hev1');
-            try {
-              return origManagedAddSourceBuffer.call(this, swapped);
-            } catch {
-              /* ignore */
-            }
 
-            const normalized = swapped.replace(
-              /(hvc1\.[1-9]\d*\.[\da-fA-F]+\.)[LH](?:15\d|16\d|17\d|18\d)(\.[\da-fA-F]+)?/g,
-              '$1L123$2'
-            );
-            if (normalized !== swapped) {
+              const l93 = swapped.replace(
+                /(hvc1|hev1)(?:\.[^",]+)?/g,
+                'hvc1.1.6.L93.B0'
+              );
               try {
-                return origManagedAddSourceBuffer.call(this, normalized);
+                return origManagedAddSourceBuffer.call(this, l93);
               } catch {
                 /* ignore */
               }
+
+              const fallbacks = [
+                hasAudio
+                  ? 'video/mp4; codecs="hvc1.1.6.L93.B0,mp4a.40.2"'
+                  : 'video/mp4; codecs="hvc1.1.6.L93.B0"',
+                hasAudio
+                  ? 'video/mp4; codecs="hvc1,mp4a.40.2"'
+                  : 'video/mp4; codecs="hvc1"',
+                hasAudio
+                  ? 'video/mp4; codecs="hev1,mp4a.40.2"'
+                  : 'video/mp4; codecs="hev1"',
+                'video/mp4; codecs="hevc"'
+              ];
+              for (const fb of fallbacks) {
+                try {
+                  return origManagedAddSourceBuffer.call(this, fb);
+                } catch {
+                  /* ignore */
+                }
+              }
             }
 
-            const fallbacks = [
-              targetType.includes('mp4a')
-                ? 'video/mp4; codecs="hvc1,mp4a.40.2"'
-                : 'video/mp4; codecs="hvc1"',
-              targetType.includes('mp4a')
-                ? 'video/mp4; codecs="hvc1.1.6.L120.90,mp4a.40.2"'
-                : 'video/mp4; codecs="hvc1.1.6.L120.90"',
-              targetType.includes('mp4a')
-                ? 'video/mp4; codecs="hev1,mp4a.40.2"'
-                : 'video/mp4; codecs="hev1"',
-              'video/mp4; codecs="hevc"'
-            ];
-            for (const fb of fallbacks) {
-              try {
-                return origManagedAddSourceBuffer.call(this, fb);
-              } catch {
-                /* ignore */
+            if (targetType.includes('avc1')) {
+              const normAvc = targetType.replace(
+                /(avc1\.[0-9a-fA-F]{4})3[0-9a-fA-F]/g,
+                '$12a'
+              );
+              if (normAvc !== targetType) {
+                try {
+                  return origManagedAddSourceBuffer.call(this, normAvc);
+                } catch {
+                  /* ignore */
+                }
+              }
+              const avcFallbacks = [
+                'video/mp4; codecs="avc1.64002a,mp4a.40.2"',
+                'video/mp4; codecs="avc1.4d002a,mp4a.40.2"',
+                'video/mp4; codecs="avc1.42e01e,mp4a.40.2"'
+              ];
+              for (const fb of avcFallbacks) {
+                try {
+                  return origManagedAddSourceBuffer.call(this, fb);
+                } catch {
+                  /* ignore */
+                }
               }
             }
           }
@@ -462,14 +651,13 @@ export function patchMediaCodecs() {
               const swappedRes = origCanPlayType.call(this, swapped);
               if (swappedRes) return swappedRes;
 
-              const normalized = swapped.replace(
-                /(hvc1\.[1-9]\d*\.[\da-fA-F]+\.)L(?:15\d|16\d|17\d|18\d)(\.[\da-fA-F]+)?/g,
-                '$1L123$2'
+              const l93 = swapped.replace(
+                /(hvc1|hev1)(?:\.[^",]+)?/g,
+                'hvc1.1.6.L93.B0'
               );
-              if (normalized !== swapped) {
-                const normRes = origCanPlayType.call(this, normalized);
-                if (normRes) return normRes;
-              }
+              const l93Res = origCanPlayType.call(this, l93);
+              if (l93Res) return l93Res;
+
               const genRes = origCanPlayType.call(
                 this,
                 'video/mp4; codecs="hvc1"'
@@ -480,6 +668,22 @@ export function patchMediaCodecs() {
             /* ignore */
           }
           return '';
+        }
+        if (typeof type === 'string' && type.includes('avc1')) {
+          try {
+            const res = origCanPlayType.call(this, type);
+            if (res) return res;
+            const normAvc = type.replace(
+              /(avc1\.[0-9a-fA-F]{4})3[0-9a-fA-F]/g,
+              '$12a'
+            );
+            if (normAvc !== type) {
+              const normRes = origCanPlayType.call(this, normAvc);
+              if (normRes) return normRes;
+            }
+          } catch {
+            /* ignore */
+          }
         }
         return origCanPlayType.call(this, type);
       };

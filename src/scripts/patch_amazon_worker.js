@@ -54,14 +54,17 @@ if (
           if (origIsTypeSupported.call(self.MediaSource, swapped)) {
             return true;
           }
-          const normalized = swapped.replace(
-            /(hvc1\.[1-9]\d*\.[\da-fA-F]+\.)[LH](?:15\d|16\d|17\d|18\d)(\.[\da-fA-F]+)?/g,
-            '$1L123$2'
+          const l93 = swapped.replace(
+            /(hvc1|hev1)(?:\.[^",]+)?/g,
+            'hvc1.1.6.L93.B0'
           );
           if (
-            normalized !== swapped &&
-            origIsTypeSupported.call(self.MediaSource, normalized)
+            l93 !== swapped &&
+            origIsTypeSupported.call(self.MediaSource, l93)
           ) {
+            return true;
+          }
+          if (origIsTypeSupported.call(self.MediaSource, 'video/mp4; codecs="hvc1.1.6.L93.B0"')) {
             return true;
           }
           if (origIsTypeSupported.call(self.MediaSource, 'video/mp4; codecs="hvc1"')) {
@@ -72,6 +75,21 @@ if (
         /* ignore */
       }
       return false;
+    }
+    if (typeof type === 'string' && type.includes('avc1')) {
+      if (origIsTypeSupported.call(this || self.MediaSource, type)) {
+        return true;
+      }
+      const normAvc = type.replace(
+        /(avc1\.[0-9a-fA-F]{4})3[0-9a-fA-F]/g,
+        '$12a'
+      );
+      if (
+        normAvc !== type &&
+        origIsTypeSupported.call(this || self.MediaSource, normAvc)
+      ) {
+        return true;
+      }
     }
     return origIsTypeSupported.call(this || self.MediaSource, type);
   };
@@ -90,50 +108,79 @@ if (
     try {
       return origAddSourceBuffer.call(this, targetType);
     } catch (err) {
-      if (typeof targetType === 'string' && isHevcCodec(targetType)) {
-        const cleaned = cleanHevcCodec(targetType);
-        if (cleaned !== targetType) {
+      if (typeof targetType === 'string') {
+        if (isHevcCodec(targetType)) {
+          const hasAudio = targetType.includes('mp4a');
+          const cleaned = cleanHevcCodec(targetType);
+          if (cleaned !== targetType) {
+            try {
+              return origAddSourceBuffer.call(this, cleaned);
+            } catch {
+              /* ignore */
+            }
+          }
+          const swapped = cleaned.includes('hev1')
+            ? cleaned.replace(/hev1/g, 'hvc1')
+            : cleaned.replace(/hvc1/g, 'hev1');
           try {
-            return origAddSourceBuffer.call(this, cleaned);
+            return origAddSourceBuffer.call(this, swapped);
           } catch {
             /* ignore */
           }
-        }
-        const swapped = cleaned.includes('hev1')
-          ? cleaned.replace(/hev1/g, 'hvc1')
-          : cleaned.replace(/hvc1/g, 'hev1');
-        try {
-          return origAddSourceBuffer.call(this, swapped);
-        } catch {
-          /* ignore */
-        }
 
-        const normalized = swapped.replace(
-          /(hvc1\.[1-9]\d*\.[\da-fA-F]+\.)[LH](?:15\d|16\d|17\d|18\d)(\.[\da-fA-F]+)?/g,
-          '$1L123$2'
-        );
-        if (normalized !== swapped) {
+          const l93 = swapped.replace(
+            /(hvc1|hev1)(?:\.[^",]+)?/g,
+            'hvc1.1.6.L93.B0'
+          );
           try {
-            return origAddSourceBuffer.call(this, normalized);
+            return origAddSourceBuffer.call(this, l93);
           } catch {
             /* ignore */
           }
+
+          const fallbacks = [
+            hasAudio
+              ? 'video/mp4; codecs="hvc1.1.6.L93.B0,mp4a.40.2"'
+              : 'video/mp4; codecs="hvc1.1.6.L93.B0"',
+            hasAudio
+              ? 'video/mp4; codecs="hvc1,mp4a.40.2"'
+              : 'video/mp4; codecs="hvc1"',
+            hasAudio
+              ? 'video/mp4; codecs="hev1,mp4a.40.2"'
+              : 'video/mp4; codecs="hev1"',
+            'video/mp4; codecs="hevc"'
+          ];
+          for (const fb of fallbacks) {
+            try {
+              return origAddSourceBuffer.call(this, fb);
+            } catch {
+              /* ignore */
+            }
+          }
         }
 
-        const fallbacks = [
-          targetType.includes('mp4a')
-            ? 'video/mp4; codecs="hvc1,mp4a.40.2"'
-            : 'video/mp4; codecs="hvc1"',
-          targetType.includes('mp4a')
-            ? 'video/mp4; codecs="hvc1.1.6.L120.90,mp4a.40.2"'
-            : 'video/mp4; codecs="hvc1.1.6.L120.90"',
-          'video/mp4; codecs="hevc"'
-        ];
-        for (const fb of fallbacks) {
-          try {
-            return origAddSourceBuffer.call(this, fb);
-          } catch {
-            /* ignore */
+        if (targetType.includes('avc1')) {
+          const normAvc = targetType.replace(
+            /(avc1\.[0-9a-fA-F]{4})3[0-9a-fA-F]/g,
+            '$12a'
+          );
+          if (normAvc !== targetType) {
+            try {
+              return origAddSourceBuffer.call(this, normAvc);
+            } catch {
+              /* ignore */
+            }
+          }
+          const avcFallbacks = [
+            'video/mp4; codecs="avc1.64002a,mp4a.40.2"',
+            'video/mp4; codecs="avc1.4d002a,mp4a.40.2"'
+          ];
+          for (const fb of avcFallbacks) {
+            try {
+              return origAddSourceBuffer.call(this, fb);
+            } catch {
+              /* ignore */
+            }
           }
         }
       }
@@ -311,16 +358,25 @@ function patchManifest(manifest) {
   // 1. Clean non-standard HEVC codec strings (trim extra .0.0.0.0.0 tokens)
   let cleaned = cleanHevcCodec(manifest);
 
-  // 2. Normalize hev1 -> hvc1 for webOS Chromium MSE compatibility
-  cleaned = cleaned.replace(/hev1/g, 'hvc1');
-
-  // 3. Normalize Level 5.0+ (L150/L153/H150/H153) to Level 4.1 (L123) for webOS MSE compatibility
-  // WebOS Chromium caps supported HEVC levels at Level 4.1 in its MSE table;
-  // the TV hardware decoder natively handles 1440p60/4K60 once SourceBuffer is opened.
-  cleaned = cleaned.replace(
-    /(hvc1\.[1-9]\d*\.[\da-fA-F]+\.)[LH](?:15\d|16\d|17\d|18\d)(\.[\da-fA-F]+)?/g,
-    '$1L123$2'
-  );
+  // 2. Normalize codecs inside CODECS="..." attribute:
+  // - All HEVC variants (hev1 / hvc1) -> hvc1.1.6.L93.B0 (universal baseline for webOS MSE)
+  // - High-level AVC (H.264 Level 5.0+ e.g. avc1.640033) -> Level 4.2 (avc1.64002a)
+  cleaned = cleaned.replace(/CODECS="([^"]*)"/g, function (_match, codecs) {
+    const normalizedCodecs = codecs
+      .split(',')
+      .map(function (c) {
+        const trimmed = c.trim();
+        if (trimmed.startsWith('hev1') || trimmed.startsWith('hvc1')) {
+          return 'hvc1.1.6.L93.B0';
+        }
+        if (/^avc1\.[0-9a-f]{4}3[0-9a-f]$/i.test(trimmed)) {
+          return trimmed.slice(0, 9) + '2a';
+        }
+        return trimmed;
+      })
+      .join(',');
+    return 'CODECS="' + normalizedCodecs + '"';
+  });
 
   // 4. Strip any AV1 variants (av01 / av1) to avoid software decoding / freezing
   if (cleaned.includes('av01') || cleaned.includes('av1')) {

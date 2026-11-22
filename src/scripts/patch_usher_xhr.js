@@ -343,16 +343,25 @@ export function patchManifest(manifest) {
   // 1. Clean non-standard HEVC codec strings (trim extra .0.0.0.0.0 tokens)
   let cleaned = cleanHevcCodec(manifest);
 
-  // 2. Normalize hev1 -> hvc1 for webOS Chromium MSE compatibility
-  cleaned = cleaned.replace(/hev1/g, 'hvc1');
-
-  // 3. Normalize Level 5.0+ (L150/L153/H150/H153) to Level 4.1 (L123) for webOS MSE compatibility
-  // WebOS Chromium caps supported HEVC levels at Level 4.1 in its MSE table;
-  // the TV hardware decoder natively handles 1440p60/4K60 once SourceBuffer is opened.
-  cleaned = cleaned.replace(
-    /(hvc1\.[1-9]\d*\.[\da-fA-F]+\.)[LH](?:15\d|16\d|17\d|18\d)(\.[\da-fA-F]+)?/g,
-    '$1L123$2'
-  );
+  // 2. Normalize codecs inside CODECS="..." attribute:
+  // - All HEVC variants (hev1 / hvc1) -> hvc1.1.6.L93.B0 (universal baseline for webOS MSE)
+  // - High-level AVC (H.264 Level 5.0+ e.g. avc1.640033) -> Level 4.2 (avc1.64002a)
+  cleaned = cleaned.replace(/CODECS="([^"]*)"/g, (_match, codecs) => {
+    const normalizedCodecs = codecs
+      .split(',')
+      .map((c) => {
+        const trimmed = c.trim();
+        if (trimmed.startsWith('hev1') || trimmed.startsWith('hvc1')) {
+          return 'hvc1.1.6.L93.B0';
+        }
+        if (/^avc1\.[0-9a-f]{4}3[0-9a-f]$/i.test(trimmed)) {
+          return trimmed.slice(0, 9) + '2a';
+        }
+        return trimmed;
+      })
+      .join(',');
+    return `CODECS="${normalizedCodecs}"`;
+  });
 
   // 4. Strip any AV1 variants (av01 / av1) to avoid software decoding / freezing
   if (cleaned.includes('av01') || cleaned.includes('av1')) {
